@@ -1,0 +1,12 @@
+{
+  "name": "davan-student-news-fetcher",
+  "version": "1.0.0",
+  "description": "GitHub Actions scheduled script: fetches India/World RSS + USD/INR rate + weather + quote, writes to db3 (davan-student-news). See fetch_news.js header for full design context. Runs on GitHub's servers, no Blaze plan / Google Cloud billing required.",
+  "main": "fetch_news.js",
+  "engines": { "node": "20" },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "node-fetch": "^2.7.0",
+    "xml2js": "^0.6.2"
+  }
+}
