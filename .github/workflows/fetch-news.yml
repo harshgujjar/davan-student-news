@@ -1,1 +1,49 @@
+name: Fetch Student News
 
+# Runs the Page 6 "News & Rates" fetcher on a schedule, on GitHub's own
+# servers — no Google Cloud billing, no Blaze plan, laptop can be off.
+# See scripts/fetch_news.js header comment for full design context and
+# scripts/fetch_news.js's SETUP NOTES section for the one-time setup
+# steps (service account key -> GitHub Secret) this workflow depends on.
+
+on:
+  schedule:
+    # Every 45 minutes. GitHub Actions cron is UTC always — 45 * * * *
+    # means "at minute 45 of every hour", which is NOT the same as "every
+    # 45 minutes" (that would drift). Using */45 here for a genuinely
+    # even 45-minute cadence, same as the original Cloud Scheduler plan.
+    # NOTE: GitHub's schedule triggers are best-effort and can be delayed
+    # by a few minutes during high load on their infrastructure — this is
+    # a known GitHub Actions limitation, not a bug in this workflow.
+    - cron: '*/45 * * * *'
+  # Lets you trigger a run manually from the Actions tab — this is the
+  # button used for the "SETUP NOTES step 7" testing step, and for any
+  # time you want fresh data immediately instead of waiting for the
+  # schedule.
+  workflow_dispatch: {}
+
+jobs:
+  fetch-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: scripts
+        run: npm install --omit=dev
+
+      - name: Run news/rates fetch
+        working-directory: scripts
+        env:
+          # Injected from the encrypted GitHub Secret — never appears in
+          # logs, never committed to the repo, even though this repo is
+          # public. See fetch_news.js SETUP NOTES step 4 for how to
+          # create this secret.
+          FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+        run: node fetch_news.js
