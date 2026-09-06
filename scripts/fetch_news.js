@@ -92,6 +92,12 @@ const SOURCES = {
   // Davangere, Karnataka coordinates (matches Harsha's meter.html location context)
   weatherApi: 'https://api.open-meteo.com/v1/forecast?latitude=14.4644&longitude=75.9218&current=temperature_2m,weather_code&timezone=Asia%2FKolkata',
   quoteApi: 'https://zenquotes.io/api/today',
+  // Free, no-key spot price API (XAU/XAG in USD). No FX call needed —
+  // this run already fetches USD/INR via fetchUsdInrRate() above, so
+  // fetchGoldSilverRates() reuses that same rate rather than hitting a
+  // second FX endpoint.
+  goldApi: 'https://api.gold-api.com/price/XAU',
+  silverApi: 'https://api.gold-api.com/price/XAG',
 };
 
 const FETCH_TIMEOUT_MS = 10000;
@@ -139,7 +145,7 @@ async function fetchRssHeadlines(url, max) {
 
 async function fetchIndiaHeadlines() {
   try {
-    return await fetchRssHeadlines(SOURCES.indiaRss, 3);
+    return await fetchRssHeadlines(SOURCES.indiaRss, 4);
   } catch (e) {
     console.error('fetchIndiaHeadlines FAILED:', e.message);
     return [];
@@ -148,7 +154,7 @@ async function fetchIndiaHeadlines() {
 
 async function fetchWorldHeadlines() {
   try {
-    return await fetchRssHeadlines(SOURCES.worldRss, 2);
+    return await fetchRssHeadlines(SOURCES.worldRss, 4);
   } catch (e) {
     console.error('fetchWorldHeadlines FAILED:', e.message);
     return [];
@@ -213,6 +219,51 @@ async function fetchQuoteText() {
   }
 }
 
+// Gold/Silver rates via api.gold-api.com (free, no key). Both calls run
+// in parallel, then converted to INR using usdInrRate (already fetched
+// this same cycle — no extra FX call). Math ported from Harsha's own
+// gold-silver-rates.html demo: troy-ounce USD spot -> INR -> per-10g.
+// Gold shown as 24K and 22K (22K = 24K * 0.916); Silver shown per 10g
+// (NOT per kg like the demo page, to match gold's unit on a small
+// widget face — Harsha's explicit choice, see W68_CHANGES.md).
+// AUTO-FETCH ONLY: unlike India/World/quote/weather, there is no admin
+// override path for these 3 fields — Harsha's explicit choice.
+// Whole block hides on the widget unless all 3 values are present, so
+// on ANY failure here this returns empty strings for all three rather
+// than partial data (partial data reads as more confusing than none).
+async function fetchGoldSilverRates(usdInrRate) {
+  const empty = { gold24Rate: '', gold22Rate: '', silverRate: '' };
+  try {
+    const rate = parseFloat(usdInrRate);
+    if (!rate) throw new Error('no usdInrRate available for conversion');
+
+    const [goldRes, silverRes] = await Promise.all([
+      fetchWithTimeout(SOURCES.goldApi),
+      fetchWithTimeout(SOURCES.silverApi),
+    ]);
+    const [goldData, silverData] = await Promise.all([goldRes.json(), silverRes.json()]);
+
+    const goldUsdOz = goldData && goldData.price;
+    const silverUsdOz = silverData && silverData.price;
+    if (typeof goldUsdOz !== 'number' || typeof silverUsdOz !== 'number') {
+      throw new Error('missing price field in gold-api response');
+    }
+
+    const gold24Per10g = (goldUsdOz * rate / 31.1034768) * 10;
+    const gold22Per10g = gold24Per10g * 0.916;
+    const silverPer10g = (silverUsdOz * rate / 31.1034768) * 10;
+
+    return {
+      gold24Rate: gold24Per10g.toFixed(0),
+      gold22Rate: gold22Per10g.toFixed(0),
+      silverRate: silverPer10g.toFixed(0),
+    };
+  } catch (e) {
+    console.error('fetchGoldSilverRates FAILED:', e.message);
+    return empty;
+  }
+}
+
 async function runFetchCycle() {
   ensureFirebaseApp();
 
@@ -229,16 +280,19 @@ async function runFetchCycle() {
     return { skipped: true, reason: 'locked_override' };
   }
 
-  // All five fetches run in parallel and are each individually
-  // failure-isolated above — Promise.all is safe here because none of
-  // the individual fetch*() functions ever reject; they catch internally
-  // and return a safe empty value instead.
-  const [indiaHeadlines, worldHeadlines, usdInrRate, weatherLine, quoteText] = await Promise.all([
+  // usdInrRate is fetched first, on its own, because fetchGoldSilverRates()
+  // needs it for the USD->INR conversion — everything else still runs in
+  // parallel afterward. All fetch*() functions here are failure-isolated
+  // (they catch internally and return a safe empty value), so Promise.all
+  // is safe: none of them ever reject.
+  const usdInrRate = await fetchUsdInrRate();
+
+  const [indiaHeadlines, worldHeadlines, weatherLine, quoteText, goldSilver] = await Promise.all([
     fetchIndiaHeadlines(),
     fetchWorldHeadlines(),
-    fetchUsdInrRate(),
     fetchWeatherLine(),
     fetchQuoteText(),
+    fetchGoldSilverRates(usdInrRate),
   ]);
 
   const payload = {
@@ -247,6 +301,9 @@ async function runFetchCycle() {
     usdInrRate,
     weatherLine,
     quoteText,
+    gold24Rate: goldSilver.gold24Rate,
+    gold22Rate: goldSilver.gold22Rate,
+    silverRate: goldSilver.silverRate,
     fetchedAt: Date.now(),
   };
 
@@ -258,6 +315,9 @@ async function runFetchCycle() {
     usdInrRate,
     weatherLine,
     hasQuote: !!quoteText,
+    gold24Rate: goldSilver.gold24Rate,
+    gold22Rate: goldSilver.gold22Rate,
+    silverRate: goldSilver.silverRate,
   });
 
   return payload;
