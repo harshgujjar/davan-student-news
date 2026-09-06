@@ -96,24 +96,37 @@ function ensureFirebaseApp() {
 //                                    production before this change.
 //   bollywoodhungama, filmibeatkannada — fetched directly this session,
 //                                    confirmed real XML, current headlines.
-//   toi, ndtv, bbcindia           — real, well-documented URLs (multiple
-//                                    independent sources agree on them),
-//                                    but NOT fetched directly this session
-//                                    — the sandbox used to build this file
-//                                    was blocked from reaching these
-//                                    domains. Left in as real options
-//                                    since fetchRssHeadlines()'s existing
-//                                    safe-failure design means a bad URL
-//                                    here just yields zero headlines for
+//   toi, ndtv                     — confirmed working by Harsha directly
+//                                    in a browser (2026-09-06) — Claude's
+//                                    own sandbox couldn't reach these
+//                                    domains to verify independently, but
+//                                    Harsha's direct check settles it.
+//   indianexpress                 — fetched directly this session (Harsha
+//                                    uploaded the raw response), confirmed
+//                                    real XML, current headlines.
+//   hindustantimes                — confirmed by Harsha uploading the raw
+//                                    XML response this session; note the
+//                                    real path is /feeds/rss/india-news/
+//                                    rssfeed.xml, NOT /rss/topnews/... or
+//                                    /rss/india-news/... (both wrong
+//                                    guesses tried first — HT's actual
+//                                    feed picker page at /rss confirmed
+//                                    the correct pattern).
+//   bbcindia                      — real, well-documented URL, still not
+//                                    tested by anyone yet. Left in as a
+//                                    real option since fetchRssHeadlines()'s
+//                                    existing safe-failure design means a
+//                                    bad URL just yields zero headlines for
 //                                    that one source, not a broken run —
-//                                    but treat these three as unconfirmed
-//                                    until you see real headlines from
-//                                    them in a live GitHub Actions run.
+//                                    but treat this one specifically as
+//                                    unconfirmed until tested.
 const NEWS_SOURCES = {
   india: {
     thehindu: 'https://www.thehindu.com/news/national/?service=rss',
     toi: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
     ndtv: 'https://feeds.feedburner.com/ndtvnews-top-stories',
+    indianexpress: 'https://indianexpress.com/section/india/feed/',
+    hindustantimes: 'https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml',
   },
   world: {
     bbcworld: 'https://feeds.bbci.co.uk/news/world/rss.xml',
