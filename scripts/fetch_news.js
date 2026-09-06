@@ -92,12 +92,17 @@ const SOURCES = {
   // Davangere, Karnataka coordinates (matches Harsha's meter.html location context)
   weatherApi: 'https://api.open-meteo.com/v1/forecast?latitude=14.4644&longitude=75.9218&current=temperature_2m,weather_code&timezone=Asia%2FKolkata',
   quoteApi: 'https://zenquotes.io/api/today',
-  // Free, no-key spot price API (XAU/XAG in USD). No FX call needed —
-  // this run already fetches USD/INR via fetchUsdInrRate() above, so
-  // fetchGoldSilverRates() reuses that same rate rather than hitting a
-  // second FX endpoint.
-  goldApi: 'https://api.gold-api.com/price/XAU',
-  silverApi: 'https://api.gold-api.com/price/XAG',
+  // goldprice.dev — free, no-key, documented, verified live 2026-09-06
+  // (api.gold-api.com was the original choice but every route on that
+  // domain returned "Symbol not found"/plain-text 404s when tested
+  // directly in a browser — it appears to no longer serve XAU/XAG the
+  // way earlier notes assumed. See W68 gold/silver debugging session).
+  // /v1/carat returns 24k/22k per-gram price directly in the requested
+  // currency — no manual troy-ounce/FX math needed on our side.
+  goldCaratApi: 'https://api.goldprice.dev/v1/carat?currency=INR',
+  // /v1/convert does XAG -> INR per-gram directly; we ask for 10 grams
+  // so the result is already "per 10g" without further math.
+  silverConvertApi: 'https://api.goldprice.dev/v1/convert?from=XAG&to=INR&amount=10&unit=gram',
 };
 
 const FETCH_TIMEOUT_MS = 10000;
@@ -251,52 +256,51 @@ async function fetchQuoteText() {
   }
 }
 
-// Gold/Silver rates via api.gold-api.com (free, no key). Converted to
-// INR using usdInrRate (already fetched this same cycle — no extra FX
-// call). Math ported from Harsha's own gold-silver-rates.html demo:
-// troy-ounce USD spot -> INR -> per-10g. Gold shown as 24K and 22K
-// (22K = 24K * 0.916); Silver shown per 10g (NOT per kg like the demo
-// page, to match gold's unit on a small widget face — Harsha's explicit
-// choice, see W68_CHANGES.md).
+// Gold/Silver rates via goldprice.dev (free, no key, verified live and
+// documented 2026-09-06 — see SOURCES comment above for why this
+// replaced api.gold-api.com, which turned out to no longer serve
+// XAU/XAG despite earlier notes assuming it did).
+//
+// /v1/carat already returns per-gram 24k/22k prices in whatever
+// ?currency= is requested — no manual troy-ounce or FX math needed on
+// our side, unlike the old api.gold-api.com approach. Multiplied by 10
+// here for "per 10 grams" to match the widget's existing display unit.
+// /v1/convert does the same for silver: asking for amount=10, unit=gram
+// returns silver's INR value for exactly 10 grams directly.
+// Both are documented "No auth required · Free+" — genuinely no API key.
+//
+// Silver shown per 10g (NOT per kg like Harsha's original demo page),
+// to match gold's unit on a small widget face — Harsha's explicit choice
+// (see W68_CHANGES.md).
 // AUTO-FETCH ONLY: unlike India/World/quote/weather, there is no admin
 // override path for these 3 fields — Harsha's explicit choice.
 // Whole block hides on the widget unless all 3 values are present, so
 // on ANY failure here this returns empty strings for all three rather
 // than partial data (partial data reads as more confusing than none).
 //
-// SEQUENTIAL + RETRY, NOT PARALLEL: this originally fired XAU + XAG at
-// the exact same instant via Promise.all, which api.gold-api.com's free
-// tier rejected with HTTP 429 (GitHub Actions run #47, 2026-09-06). A
-// first fix staggered the two calls by 1.5s, which STILL 429'd (run #48,
-// same day) — so the limit is a short rolling window, not a same-instant
-// burst check. Now: sequential with a longer 5s gap, plus
-// fetchWithRetryOn429() retries a 429 (only a 429, nothing else) after
-// waiting 5s, up to 2 extra attempts per call.
-async function fetchGoldSilverRates(usdInrRate) {
+// Sequential with a short gap (not the api.gold-api.com 429 issue, but
+// keeping the pattern defensive since this is still a free-tier API run
+// from a shared GitHub Actions IP).
+async function fetchGoldSilverRates() {
   const empty = { gold24Rate: '', gold22Rate: '', silverRate: '' };
   try {
-    const rate = parseFloat(usdInrRate);
-    if (!rate) throw new Error('no usdInrRate available for conversion');
-
-    const goldRes = await fetchWithRetryOn429(SOURCES.goldApi);
-    const goldData = await goldRes.json();
-    await sleep(5000);
-    const silverRes = await fetchWithRetryOn429(SOURCES.silverApi);
+    const caratRes = await fetchWithRetryOn429(SOURCES.goldCaratApi);
+    const caratData = await caratRes.json();
+    await sleep(1000);
+    const silverRes = await fetchWithRetryOn429(SOURCES.silverConvertApi);
     const silverData = await silverRes.json();
 
-    const goldUsdOz = goldData && goldData.price;
-    const silverUsdOz = silverData && silverData.price;
-    if (typeof goldUsdOz !== 'number' || typeof silverUsdOz !== 'number') {
-      throw new Error('missing price field in gold-api response');
+    const gold24PerGram = caratData && parseFloat(caratData.price_gram_24k);
+    const gold22PerGram = caratData && parseFloat(caratData.price_gram_22k);
+    const silverPer10g = silverData && parseFloat(silverData.result);
+
+    if (!Number.isFinite(gold24PerGram) || !Number.isFinite(gold22PerGram) || !Number.isFinite(silverPer10g)) {
+      throw new Error('missing/invalid price field in goldprice.dev response');
     }
 
-    const gold24Per10g = (goldUsdOz * rate / 31.1034768) * 10;
-    const gold22Per10g = gold24Per10g * 0.916;
-    const silverPer10g = (silverUsdOz * rate / 31.1034768) * 10;
-
     return {
-      gold24Rate: gold24Per10g.toFixed(0),
-      gold22Rate: gold22Per10g.toFixed(0),
+      gold24Rate: (gold24PerGram * 10).toFixed(0),
+      gold22Rate: (gold22PerGram * 10).toFixed(0),
       silverRate: silverPer10g.toFixed(0),
     };
   } catch (e) {
@@ -321,19 +325,20 @@ async function runFetchCycle() {
     return { skipped: true, reason: 'locked_override' };
   }
 
-  // usdInrRate is fetched first, on its own, because fetchGoldSilverRates()
-  // needs it for the USD->INR conversion — everything else still runs in
-  // parallel afterward. All fetch*() functions here are failure-isolated
-  // (they catch internally and return a safe empty value), so Promise.all
-  // is safe: none of them ever reject.
-  const usdInrRate = await fetchUsdInrRate();
-
-  const [indiaHeadlines, worldHeadlines, weatherLine, quoteText, goldSilver] = await Promise.all([
+  // All six fetches now run fully in parallel — fetchGoldSilverRates()
+  // no longer needs usdInrRate as an input (goldprice.dev converts to
+  // INR itself via ?currency=/?to=), so the earlier "fetch usdInrRate
+  // first, then the rest" ordering is no longer necessary. All fetch*()
+  // functions here are failure-isolated (they catch internally and
+  // return a safe empty value), so Promise.all is safe: none of them
+  // ever reject.
+  const [indiaHeadlines, worldHeadlines, usdInrRate, weatherLine, quoteText, goldSilver] = await Promise.all([
     fetchIndiaHeadlines(),
     fetchWorldHeadlines(),
+    fetchUsdInrRate(),
     fetchWeatherLine(),
     fetchQuoteText(),
-    fetchGoldSilverRates(usdInrRate),
+    fetchGoldSilverRates(),
   ]);
 
   const payload = {
