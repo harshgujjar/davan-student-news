@@ -219,29 +219,42 @@ async function fetchQuoteText() {
   }
 }
 
-// Gold/Silver rates via api.gold-api.com (free, no key). Both calls run
-// in parallel, then converted to INR using usdInrRate (already fetched
-// this same cycle — no extra FX call). Math ported from Harsha's own
-// gold-silver-rates.html demo: troy-ounce USD spot -> INR -> per-10g.
-// Gold shown as 24K and 22K (22K = 24K * 0.916); Silver shown per 10g
-// (NOT per kg like the demo page, to match gold's unit on a small
-// widget face — Harsha's explicit choice, see W68_CHANGES.md).
+// Small delay helper — used to stagger the gold/silver calls below so
+// they don't hit api.gold-api.com's rate limit as a simultaneous burst.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Gold/Silver rates via api.gold-api.com (free, no key). Converted to
+// INR using usdInrRate (already fetched this same cycle — no extra FX
+// call). Math ported from Harsha's own gold-silver-rates.html demo:
+// troy-ounce USD spot -> INR -> per-10g. Gold shown as 24K and 22K
+// (22K = 24K * 0.916); Silver shown per 10g (NOT per kg like the demo
+// page, to match gold's unit on a small widget face — Harsha's explicit
+// choice, see W68_CHANGES.md).
 // AUTO-FETCH ONLY: unlike India/World/quote/weather, there is no admin
 // override path for these 3 fields — Harsha's explicit choice.
 // Whole block hides on the widget unless all 3 values are present, so
 // on ANY failure here this returns empty strings for all three rather
 // than partial data (partial data reads as more confusing than none).
+//
+// SEQUENTIAL, NOT PARALLEL: this originally fired XAU + XAG at the exact
+// same instant via Promise.all, which api.gold-api.com's free tier
+// rejected with HTTP 429 (confirmed via GitHub Actions run #47 log,
+// 2026-09-06 — "fetchGoldSilverRates FAILED: HTTP 429 for
+// .../price/XAG"). Fetching XAU, waiting briefly, then fetching XAG
+// avoids the same-instant burst that triggered the rate limit.
 async function fetchGoldSilverRates(usdInrRate) {
   const empty = { gold24Rate: '', gold22Rate: '', silverRate: '' };
   try {
     const rate = parseFloat(usdInrRate);
     if (!rate) throw new Error('no usdInrRate available for conversion');
 
-    const [goldRes, silverRes] = await Promise.all([
-      fetchWithTimeout(SOURCES.goldApi),
-      fetchWithTimeout(SOURCES.silverApi),
-    ]);
-    const [goldData, silverData] = await Promise.all([goldRes.json(), silverRes.json()]);
+    const goldRes = await fetchWithTimeout(SOURCES.goldApi);
+    const goldData = await goldRes.json();
+    await sleep(1500);
+    const silverRes = await fetchWithTimeout(SOURCES.silverApi);
+    const silverData = await silverRes.json();
 
     const goldUsdOz = goldData && goldData.price;
     const silverUsdOz = silverData && silverData.price;
