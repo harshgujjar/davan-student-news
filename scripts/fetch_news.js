@@ -102,6 +102,13 @@ const SOURCES = {
 
 const FETCH_TIMEOUT_MS = 10000;
 
+// Small delay helper — used by fetchWithRetryOn429() and to stagger the
+// gold/silver calls in fetchGoldSilverRates() below.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
 async function fetchWithTimeout(url, opts = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -112,6 +119,31 @@ async function fetchWithTimeout(url, opts = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Retries a single fetchWithTimeout call on HTTP 429 specifically
+// (rate-limited), waiting `delayMs` before each retry. Any other error
+// (network failure, timeout, non-429 HTTP error) is NOT retried — it
+// rethrows immediately, since a retry wouldn't help those cases. Used
+// only by fetchGoldSilverRates(), which found api.gold-api.com's free
+// tier rejects requests spaced even 1.5s apart (HTTP 429, confirmed via
+// GitHub Actions runs #47 and #48, 2026-09-06) — retrying once with a
+// longer wait covers the case where the limit is a short rolling
+// window rather than a same-instant burst check.
+async function fetchWithRetryOn429(url, opts = {}, maxRetries = 2, delayMs = 5000) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetchWithTimeout(url, opts);
+    } catch (e) {
+      lastErr = e;
+      const is429 = /HTTP 429/.test(e.message);
+      if (!is429 || attempt === maxRetries) throw e;
+      console.log(`fetchWithRetryOn429: got 429 for ${url}, retry ${attempt + 1}/${maxRetries} after ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr;
 }
 
 // Parses a standard RSS 2.0 <channel><item><title> feed into a plain
@@ -219,12 +251,6 @@ async function fetchQuoteText() {
   }
 }
 
-// Small delay helper — used to stagger the gold/silver calls below so
-// they don't hit api.gold-api.com's rate limit as a simultaneous burst.
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // Gold/Silver rates via api.gold-api.com (free, no key). Converted to
 // INR using usdInrRate (already fetched this same cycle — no extra FX
 // call). Math ported from Harsha's own gold-silver-rates.html demo:
@@ -238,22 +264,24 @@ function sleep(ms) {
 // on ANY failure here this returns empty strings for all three rather
 // than partial data (partial data reads as more confusing than none).
 //
-// SEQUENTIAL, NOT PARALLEL: this originally fired XAU + XAG at the exact
-// same instant via Promise.all, which api.gold-api.com's free tier
-// rejected with HTTP 429 (confirmed via GitHub Actions run #47 log,
-// 2026-09-06 — "fetchGoldSilverRates FAILED: HTTP 429 for
-// .../price/XAG"). Fetching XAU, waiting briefly, then fetching XAG
-// avoids the same-instant burst that triggered the rate limit.
+// SEQUENTIAL + RETRY, NOT PARALLEL: this originally fired XAU + XAG at
+// the exact same instant via Promise.all, which api.gold-api.com's free
+// tier rejected with HTTP 429 (GitHub Actions run #47, 2026-09-06). A
+// first fix staggered the two calls by 1.5s, which STILL 429'd (run #48,
+// same day) — so the limit is a short rolling window, not a same-instant
+// burst check. Now: sequential with a longer 5s gap, plus
+// fetchWithRetryOn429() retries a 429 (only a 429, nothing else) after
+// waiting 5s, up to 2 extra attempts per call.
 async function fetchGoldSilverRates(usdInrRate) {
   const empty = { gold24Rate: '', gold22Rate: '', silverRate: '' };
   try {
     const rate = parseFloat(usdInrRate);
     if (!rate) throw new Error('no usdInrRate available for conversion');
 
-    const goldRes = await fetchWithTimeout(SOURCES.goldApi);
+    const goldRes = await fetchWithRetryOn429(SOURCES.goldApi);
     const goldData = await goldRes.json();
-    await sleep(1500);
-    const silverRes = await fetchWithTimeout(SOURCES.silverApi);
+    await sleep(5000);
+    const silverRes = await fetchWithRetryOn429(SOURCES.silverApi);
     const silverData = await silverRes.json();
 
     const goldUsdOz = goldData && goldData.price;
