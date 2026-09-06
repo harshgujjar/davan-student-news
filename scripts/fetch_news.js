@@ -156,7 +156,39 @@ const SOURCES = {
   // /v1/convert does XAG -> INR per-gram directly; we ask for 10 grams
   // so the result is already "per 10g" without further math.
   silverConvertApi: 'https://api.goldprice.dev/v1/convert?from=XAG&to=INR&amount=10&unit=gram',
+  // 2026-09-07 — Page 7 horoscope. CosmyDay: free, no key, no account.
+  // GET /content/daily/{sign}, sign lowercase (aries..pisces).
+  // WARNING: NOT independently fetch-verified — api.cosmyday.com was
+  // unreachable from the environment this was written in. Evidence it is
+  // real and keyless is strong (listed in the public-apis directory; an
+  // actively-maintained WordPress plugin by the same operator; the
+  // reference implementation Harsha supplied calls exactly this URL) —
+  // but that is evidence, not proof. Verify with:
+  //   curl "https://api.cosmyday.com/content/daily/aries"
+  // before trusting the output. Attribution is REQUIRED by the API's own
+  // terms — the portal's horoscope card credits CosmyDay, keep that.
+  horoscopeApi: 'https://api.cosmyday.com/content/daily',
+  // Fallback, confirmed live 2026-09-06. Sun-sign text only, no chart.
+  horoscopeFallbackApi: 'https://newastro.vercel.app',
+  // 2026-09-07 — Nifty. Endpoint confirmed from BharatStock's own
+  // published API reference: GET /v1/indices/{name}/prices returns
+  // { trade_date, open, high, low, close }. NOTE there is no change_pct
+  // field — the % move is computed from the previous row below.
+  // END-OF-DAY DATA, NOT LIVE. BharatStock states plainly it is not a
+  // tick-level streaming feed; prices are ingested after market close
+  // each trading day. The widget labels this a "Close" for exactly that
+  // reason — do not relabel it as a live price.
+  niftyApi: 'https://bharatstockapi.com/v1/indices/NIFTY%2050/prices',
 };
+
+// The 12 Sun signs, lowercase. These keys MUST match what
+// StudentFetchWorker.zodiacSignFromDob() and student_portal.html's
+// ASTRO_SIGNS table both produce, or the widget will look up a sign that
+// isn't in the map and silently show its "hasn't arrived yet" state.
+const ZODIAC_SIGNS = [
+  'aries', 'taurus', 'gemini', 'cancer', 'leo', 'virgo',
+  'libra', 'scorpio', 'sagittarius', 'capricorn', 'aquarius', 'pisces',
+];
 
 const FETCH_TIMEOUT_MS = 10000;
 
@@ -402,6 +434,127 @@ async function fetchGoldSilverRates() {
   }
 }
 
+// Defensive text extraction — the CosmyDay response shape is NOT
+// confirmed, so this tries several plausible field names rather than
+// assuming one fixed schema. Mirrors the findDeep()/positionInfo()
+// approach in Harsha's own reference implementation, whose author
+// clearly wrote those helpers against a moving target.
+function pickHoroscopeText(obj) {
+  if (obj == null) return '';
+  if (typeof obj === 'string') return obj.trim();
+  const keys = ['horoscope', 'description', 'text', 'content', 'daily',
+                'prediction', 'overview', 'body', 'message'];
+  for (const k of keys) {
+    if (typeof obj[k] === 'string' && obj[k].trim()) return obj[k].trim();
+  }
+  for (const k of keys) {
+    if (obj[k] && typeof obj[k] === 'object') {
+      const nested = pickHoroscopeText(obj[k]);
+      if (nested) return nested;
+    }
+  }
+  if (obj.data) return pickHoroscopeText(obj.data);
+  if (obj.result) return pickHoroscopeText(obj.result);
+  return '';
+}
+
+// All 12 signs fetched ONCE per run, server-side, then written to db3 as
+// a { sign: text } map. Every student widget reads that single node and
+// picks its own sign locally — no device ever calls an astrology API,
+// and one run covers all ~400 students regardless of how their birthdays
+// happen to split across signs.
+//
+// Sequential with a small gap rather than Promise.all: 12 rapid-fire
+// calls to a free, no-key API from one shared GitHub Actions IP is
+// exactly the pattern that got rate-limited on api.gold-api.com (see
+// fetchWithRetryOn429's own comment above). A missing sign is not fatal
+// — the widget shows its "hasn't arrived yet" state for that sign only.
+async function fetchHoroscopes() {
+  const out = {};
+  for (const sign of ZODIAC_SIGNS) {
+    let text = '';
+    try {
+      const res = await fetchWithTimeout(`${SOURCES.horoscopeApi}/${sign}`);
+      text = pickHoroscopeText(await res.json());
+    } catch (e) {
+      console.error(`fetchHoroscopes(${sign}) primary FAILED:`, e.message);
+    }
+    if (!text) {
+      try {
+        const res2 = await fetchWithTimeout(`${SOURCES.horoscopeFallbackApi}/${sign}`);
+        text = pickHoroscopeText(await res2.json());
+      } catch (e) {
+        console.error(`fetchHoroscopes(${sign}) fallback FAILED:`, e.message);
+      }
+    }
+    if (text) out[sign] = text;
+    await sleep(400);
+  }
+  console.log(`fetchHoroscopes: got ${Object.keys(out).length}/12 signs`);
+  return out;
+}
+
+// Nifty 50 EOD close + % change against the previous session.
+//
+// THE API KEY NEVER APPEARS IN THIS FILE. It is read from the
+// BHARATSTOCK_API_KEY env var, injected by GitHub Actions from an
+// encrypted repository secret — exactly the way
+// FIREBASE_SERVICE_ACCOUNT_KEY already works in ensureFirebaseApp()
+// above. This repo is public; a key committed here would be burned the
+// moment it was pushed.
+//
+// If the secret is absent this returns empty values and logs a plain
+// message rather than throwing. The widget hides the entire Nifty block
+// when niftyClose is empty, so an unconfigured key degrades to "section
+// simply not shown" — never to a broken run, and never to a placeholder
+// number, which on a home screen would read as real market data.
+async function fetchNiftyData() {
+  const empty = { niftyClose: '', niftyChangePct: '', niftyDate: '' };
+  const apiKey = process.env.BHARATSTOCK_API_KEY;
+  if (!apiKey) {
+    console.log('fetchNiftyData: SKIPPED — BHARATSTOCK_API_KEY not set (Nifty section stays hidden)');
+    return empty;
+  }
+  try {
+    // Ask for a short window rather than a single day: markets are closed
+    // on weekends and holidays, so "yesterday" is frequently not a
+    // trading day at all. Ten days always contains at least two real
+    // sessions, which is what the % change needs.
+    const from = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const res = await fetchWithTimeout(`${SOURCES.niftyApi}?from=${from}`, {
+      headers: { 'X-API-Key': apiKey },
+    });
+    const json = await res.json();
+    // BharatStock's reference documents a { data, pagination } envelope on
+    // list endpoints but shows a bare row for this particular one — accept
+    // either shape rather than betting on which it really returns.
+    const rows = Array.isArray(json) ? json : (json && Array.isArray(json.data) ? json.data : []);
+    if (!rows.length) throw new Error('no index price rows returned');
+    // Sort newest-first ourselves; do not rely on the API's ordering.
+    rows.sort((a, b) => String(b.trade_date).localeCompare(String(a.trade_date)));
+    const latest = rows[0];
+    const prev = rows[1];
+    const close = Number(latest && latest.close);
+    if (!Number.isFinite(close)) throw new Error('missing/invalid close field');
+    let changePct = '';
+    const prevClose = Number(prev && prev.close);
+    if (Number.isFinite(prevClose) && prevClose > 0) {
+      const pct = ((close - prevClose) / prevClose) * 100;
+      // Sign is baked in here so the widget does no arithmetic at all —
+      // it only reads the leading character to pick a colour.
+      changePct = (pct >= 0 ? '+' : '') + pct.toFixed(2);
+    }
+    return {
+      niftyClose: close.toFixed(2),
+      niftyChangePct: changePct,
+      niftyDate: String((latest && latest.trade_date) || ''),
+    };
+  } catch (e) {
+    console.error('fetchNiftyData FAILED:', e.message);
+    return empty;
+  }
+}
+
 async function runFetchCycle() {
   ensureFirebaseApp();
 
@@ -456,7 +609,7 @@ async function runFetchCycle() {
   // functions here are failure-isolated (they catch internally and
   // return a safe empty value), so Promise.all is safe: none of them
   // ever reject.
-  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver] = await Promise.all([
+  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty] = await Promise.all([
     fetchSectionHeadlines('india', indiaSources, indiaMaxCount),
     fetchSectionHeadlines('world', worldSources, worldMaxCount),
     fetchSectionHeadlines('bollywood', bollywoodSources, bollywoodMaxCount),
@@ -465,6 +618,11 @@ async function runFetchCycle() {
     fetchWeatherLine(),
     fetchQuoteText(),
     fetchGoldSilverRates(),
+    // 2026-09-07 — both are failure-isolated exactly like every other
+    // fetch here (they catch internally and return an empty value), so
+    // adding them to Promise.all cannot make it reject.
+    fetchHoroscopes(),
+    fetchNiftyData(),
   ]);
 
   const payload = {
@@ -479,6 +637,16 @@ async function runFetchCycle() {
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
     silverRateKg: goldSilver.silverRateKg,
+    // 2026-09-07 — Page 7. These field names must match
+    // StudentNewsConfig.parseSnapshot() EXACTLY. That function is the
+    // first point db3 data enters the widget, so a name mismatch here is
+    // invisible everywhere downstream — precisely how the gold/silver
+    // fields were silently dropped once before (see w69).
+    horoscopeBySign,
+    horoscopeDate: new Date().toISOString().slice(0, 10),
+    niftyClose: nifty.niftyClose,
+    niftyChangePct: nifty.niftyChangePct,
+    niftyDate: nifty.niftyDate,
     fetchedAt: Date.now(),
   };
 
@@ -502,6 +670,16 @@ async function runFetchCycle() {
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
     silverRateKg: goldSilver.silverRateKg,
+    // 2026-09-07 — horoscopeSigns is the count, not the text: 12 means a
+    // healthy run, 0 means BOTH CosmyDay and the newastro fallback failed
+    // for every sign (a real signal worth seeing in the Actions log), and
+    // anything between is a partial that still renders fine for the signs
+    // that landed. niftyClose empty is EXPECTED until the
+    // BHARATSTOCK_API_KEY secret is added — not an error.
+    horoscopeSigns: Object.keys(horoscopeBySign).length,
+    niftyClose: nifty.niftyClose,
+    niftyChangePct: nifty.niftyChangePct,
+    niftyDate: nifty.niftyDate,
   });
 
   return payload;
@@ -593,6 +771,39 @@ module.exports = { runFetchCycle };
  *    file) handles the schedule + running `npm install` + running this
  *    script with the secret injected as an env var — nothing further to
  *    configure beyond steps 1-5 above.
+ *
+ * 5b. (2026-09-07) NIFTY — OPTIONAL, add whenever you want it. Until this
+ *    is done, fetchNiftyData() logs "SKIPPED" and the widget hides the
+ *    Nifty block entirely. Nothing else is affected.
+ *      - Get a key at https://bharatstockapi.com — the FREE tier (Rs 0,
+ *        100 requests/day) is sufficient: this script runs every 45-60
+ *        min (~24-32 runs/day) and Nifty costs ONE call per run. Do not
+ *        pay for a higher tier for this use.
+ *      - GENERATE A NEW KEY. Do NOT reuse the old bsk_live_... key — it
+ *        was pasted into a chat session and must be treated as
+ *        compromised. Revoke it in the dashboard while you are there.
+ *      - Repo -> Settings -> Secrets and variables -> Actions ->
+ *        "New repository secret", name it exactly BHARATSTOCK_API_KEY.
+ *      - Add it to the workflow YAML's env block alongside the Firebase
+ *        one:
+ *            env:
+ *              FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+ *              BHARATSTOCK_API_KEY: ${{ secrets.BHARATSTOCK_API_KEY }}
+ *      - REMEMBER: BharatStock is END-OF-DAY data, not a live feed. The
+ *        widget labels it "Close - <date>" for that reason.
+ *
+ * 5c. (2026-09-07) HOROSCOPE — no key, no secret, nothing to configure.
+ *    But CosmyDay was never fetch-verified when this was written. Before
+ *    trusting it, run:
+ *        curl "https://api.cosmyday.com/content/daily/aries"
+ *    If that returns JSON with horoscope text, the primary source works.
+ *    If it 404s or times out, fetchHoroscopes() falls through to
+ *    newastro.vercel.app automatically — but check the Actions log for
+ *    "primary FAILED" lines, because you want to know whether you are
+ *    silently running on the fallback for all 12 signs rather than
+ *    assuming the primary is fine. After a run, confirm db3 has
+ *    widgetConfig/news/horoscopeBySign with 12 entries BEFORE expecting
+ *    anything to appear on the widget's Page 7.
  *
  * 7. TESTING: after pushing, go to the repo's Actions tab → the
  *    "Fetch Student News" workflow → "Run workflow" (manual trigger
