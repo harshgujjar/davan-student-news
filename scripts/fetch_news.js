@@ -85,9 +85,49 @@ function ensureFirebaseApp() {
   appInitialized = true;
 }
 
+// NEWS_SOURCES (2026-09-06): per-section, per-key RSS URL lookup —
+// replaces the old flat indiaRss/worldRss constants now that sections
+// support multiple admin-checkable sources (student_portal.html's new
+// "News & Rates" tab, widgetConfig/newsSourceConfig). Keys here MUST
+// match the data-source values used in that portal's checkboxes exactly.
+//
+// Verification status (2026-09-06 session):
+//   thehindu, bbcworld            — ALREADY confirmed working, live in
+//                                    production before this change.
+//   bollywoodhungama, filmibeatkannada — fetched directly this session,
+//                                    confirmed real XML, current headlines.
+//   toi, ndtv, bbcindia           — real, well-documented URLs (multiple
+//                                    independent sources agree on them),
+//                                    but NOT fetched directly this session
+//                                    — the sandbox used to build this file
+//                                    was blocked from reaching these
+//                                    domains. Left in as real options
+//                                    since fetchRssHeadlines()'s existing
+//                                    safe-failure design means a bad URL
+//                                    here just yields zero headlines for
+//                                    that one source, not a broken run —
+//                                    but treat these three as unconfirmed
+//                                    until you see real headlines from
+//                                    them in a live GitHub Actions run.
+const NEWS_SOURCES = {
+  india: {
+    thehindu: 'https://www.thehindu.com/news/national/?service=rss',
+    toi: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
+    ndtv: 'https://feeds.feedburner.com/ndtvnews-top-stories',
+  },
+  world: {
+    bbcworld: 'https://feeds.bbci.co.uk/news/world/rss.xml',
+    bbcindia: 'https://feeds.bbci.co.uk/news/world/asia/india/rss.xml',
+  },
+  bollywood: {
+    bollywoodhungama: 'https://www.bollywoodhungama.com/rss/news.xml',
+  },
+  sandalwood: {
+    filmibeatkannada: 'https://kannada.filmibeat.com/rss/feeds/filmibeat-kannada-fb.xml',
+  },
+};
+
 const SOURCES = {
-  indiaRss: 'https://www.thehindu.com/news/national/?service=rss',
-  worldRss: 'https://feeds.bbci.co.uk/news/world/rss.xml',
   rateApi: 'https://api.frankfurter.dev/v2/rate/USD/INR',
   // Davangere, Karnataka coordinates (matches Harsha's meter.html location context)
   weatherApi: 'https://api.open-meteo.com/v1/forecast?latitude=14.4644&longitude=75.9218&current=temperature_2m,weather_code&timezone=Asia%2FKolkata',
@@ -180,22 +220,54 @@ async function fetchRssHeadlines(url, max) {
   return headlines;
 }
 
-async function fetchIndiaHeadlines() {
-  try {
-    return await fetchRssHeadlines(SOURCES.indiaRss, 4);
-  } catch (e) {
-    console.error('fetchIndiaHeadlines FAILED:', e.message);
-    return [];
-  }
-}
+// Generic multi-source section fetcher (2026-09-06) — replaces the old
+// fetchIndiaHeadlines()/fetchWorldHeadlines() pair now that any section
+// can have 1+ admin-checked sources (see NEWS_SOURCES + portal's News &
+// Rates tab). Fetches every enabled source for the section in parallel,
+// merges results, de-dupes by exact title match (multiple sources
+// covering the same story is common — e.g. a shared wire report), then
+// returns the top `maxCount` headlines. A single source failing (bad
+// URL, feed down, malformed XML) never blocks the others — each
+// individual fetch is wrapped, same safe-failure principle as
+// fetchRssHeadlines()'s own per-item handling.
+//
+// Order after merging is "whichever source's headlines came first in
+// enabledSources order" rather than a true cross-source chronological
+// sort — RSS feeds don't reliably expose comparable timestamps across
+// different publishers' formats, so a naive date-sort risked being
+// wrong in a way that's hard to notice. Good enough for a widget
+// headline strip; not presented as a strict global timeline.
+async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4) {
+  const sectionSources = NEWS_SOURCES[sectionKey] || {};
+  const urls = enabledSourceKeys
+    .map((key) => sectionSources[key])
+    .filter(Boolean);
 
-async function fetchWorldHeadlines() {
-  try {
-    return await fetchRssHeadlines(SOURCES.worldRss, 4);
-  } catch (e) {
-    console.error('fetchWorldHeadlines FAILED:', e.message);
-    return [];
+  if (urls.length === 0) return [];
+
+  const perSourceMax = maxCount; // fetch up to maxCount from EACH source, then trim the merged/deduped result down to maxCount overall
+  const results = await Promise.all(
+    urls.map((url) =>
+      fetchRssHeadlines(url, perSourceMax).catch((e) => {
+        console.error(`fetchSectionHeadlines(${sectionKey}) source FAILED: ${url} —`, e.message);
+        return [];
+      })
+    )
+  );
+
+  const seen = new Set();
+  const merged = [];
+  for (const list of results) {
+    for (const headline of list) {
+      const key = headline.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(headline);
+      if (merged.length >= maxCount) break;
+    }
+    if (merged.length >= maxCount) break;
   }
+  return merged;
 }
 
 // Frankfurter returns { amount, base, date, rate }. Rounds to 2 decimals
@@ -269,20 +341,27 @@ async function fetchQuoteText() {
 // returns silver's INR value for exactly 10 grams directly.
 // Both are documented "No auth required · Free+" — genuinely no API key.
 //
-// Silver shown per 10g (NOT per kg like Harsha's original demo page),
-// to match gold's unit on a small widget face — Harsha's explicit choice
-// (see W68_CHANGES.md).
+// Silver shown as BOTH per-10g (to match gold's unit on a small widget
+// face — Harsha's original 2026-09-01 choice) AND per-kg (Harsha's
+// 2026-09-06 request, alongside the per-10g figure, not replacing it).
+// silverRateKg is derived as silverPer10g * 100 rather than a third API
+// call — 10g -> 1000g is a clean x100 multiply, no separate /v1/convert
+// call needed (same "reuse what we already fetched" principle as
+// usdInrRate not needing a second FX call elsewhere in this file).
 // AUTO-FETCH ONLY: unlike India/World/quote/weather, there is no admin
-// override path for these 3 fields — Harsha's explicit choice.
-// Whole block hides on the widget unless all 3 values are present, so
-// on ANY failure here this returns empty strings for all three rather
-// than partial data (partial data reads as more confusing than none).
+// override path for these fields — Harsha's explicit choice.
+// Whole block hides on the widget unless the 3 core values (24K/22K/
+// silver-per-10g) are present, so on ANY failure here this returns
+// empty strings for all four rather than partial data (partial data
+// reads as more confusing than none). silverRateKg specifically is
+// still derived even on a "success" path — it can never be non-empty
+// while silverRate is empty, since it's computed directly from it.
 //
 // Sequential with a short gap (not the api.gold-api.com 429 issue, but
 // keeping the pattern defensive since this is still a free-tier API run
 // from a shared GitHub Actions IP).
 async function fetchGoldSilverRates() {
-  const empty = { gold24Rate: '', gold22Rate: '', silverRate: '' };
+  const empty = { gold24Rate: '', gold22Rate: '', silverRate: '', silverRateKg: '' };
   try {
     const caratRes = await fetchWithRetryOn429(SOURCES.goldCaratApi);
     const caratData = await caratRes.json();
@@ -302,6 +381,7 @@ async function fetchGoldSilverRates() {
       gold24Rate: (gold24PerGram * 10).toFixed(0),
       gold22Rate: (gold22PerGram * 10).toFixed(0),
       silverRate: silverPer10g.toFixed(0),
+      silverRateKg: (silverPer10g * 100).toFixed(0),
     };
   } catch (e) {
     console.error('fetchGoldSilverRates FAILED:', e.message);
@@ -325,16 +405,49 @@ async function runFetchCycle() {
     return { skipped: true, reason: 'locked_override' };
   }
 
-  // All six fetches now run fully in parallel — fetchGoldSilverRates()
+  // Max-count config (2026-09-06): portal-side chip selector at
+  // widgetConfig/newsMaxCount lets the admin choose 4-7 headlines per
+  // section, independently per section. Absent (never set, or an older
+  // portal build) => 4, same "absent means the old default" convention
+  // as pageEnabled/newsOverride elsewhere in this file.
+  const maxCountSnap = await admin.database().ref('widgetConfig/newsMaxCount').once('value');
+  const maxCountConfig = maxCountSnap.val() || {};
+  const indiaMaxCount = Number(maxCountConfig.india) || 4;
+  const worldMaxCount = Number(maxCountConfig.world) || 4;
+  const bollywoodMaxCount = Number(maxCountConfig.bollywood) || 4;
+  const sandalwoodMaxCount = Number(maxCountConfig.sandalwood) || 4;
+
+  // Source config (2026-09-06): widgetConfig/newsSourceConfig, written by
+  // the portal's News & Rates tab checkboxes — which RSS source(s) feed
+  // each section. Absent (never configured, or an older portal build)
+  // falls back to the single source each section had before this feature
+  // existed, so an admin who never opens this new UI keeps getting
+  // exactly the same India/World/Bollywood/Sandalwood behavior as before.
+  const sourceConfigSnap = await admin.database().ref('widgetConfig/newsSourceConfig').once('value');
+  const sourceConfig = sourceConfigSnap.val() || {};
+  const defaultSources = {
+    india: ['thehindu'],
+    world: ['bbcworld'],
+    bollywood: ['bollywoodhungama'],
+    sandalwood: ['filmibeatkannada'],
+  };
+  const indiaSources = (sourceConfig.india && sourceConfig.india.enabledSources) || defaultSources.india;
+  const worldSources = (sourceConfig.world && sourceConfig.world.enabledSources) || defaultSources.world;
+  const bollywoodSources = (sourceConfig.bollywood && sourceConfig.bollywood.enabledSources) || defaultSources.bollywood;
+  const sandalwoodSources = (sourceConfig.sandalwood && sourceConfig.sandalwood.enabledSources) || defaultSources.sandalwood;
+
+  // All eight fetches now run fully in parallel — fetchGoldSilverRates()
   // no longer needs usdInrRate as an input (goldprice.dev converts to
   // INR itself via ?currency=/?to=), so the earlier "fetch usdInrRate
   // first, then the rest" ordering is no longer necessary. All fetch*()
   // functions here are failure-isolated (they catch internally and
   // return a safe empty value), so Promise.all is safe: none of them
   // ever reject.
-  const [indiaHeadlines, worldHeadlines, usdInrRate, weatherLine, quoteText, goldSilver] = await Promise.all([
-    fetchIndiaHeadlines(),
-    fetchWorldHeadlines(),
+  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver] = await Promise.all([
+    fetchSectionHeadlines('india', indiaSources, indiaMaxCount),
+    fetchSectionHeadlines('world', worldSources, worldMaxCount),
+    fetchSectionHeadlines('bollywood', bollywoodSources, bollywoodMaxCount),
+    fetchSectionHeadlines('sandalwood', sandalwoodSources, sandalwoodMaxCount),
     fetchUsdInrRate(),
     fetchWeatherLine(),
     fetchQuoteText(),
@@ -344,12 +457,15 @@ async function runFetchCycle() {
   const payload = {
     indiaHeadlines,
     worldHeadlines,
+    bollywoodHeadlines,
+    sandalwoodHeadlines,
     usdInrRate,
     weatherLine,
     quoteText,
     gold24Rate: goldSilver.gold24Rate,
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
+    silverRateKg: goldSilver.silverRateKg,
     fetchedAt: Date.now(),
   };
 
@@ -357,13 +473,22 @@ async function runFetchCycle() {
 
   console.log('runFetchCycle: wrote to db3', {
     indiaCount: indiaHeadlines.length,
+    indiaMaxCount,
+    indiaSources,
     worldCount: worldHeadlines.length,
+    worldMaxCount,
+    worldSources,
+    bollywoodCount: bollywoodHeadlines.length,
+    bollywoodMaxCount,
+    sandalwoodCount: sandalwoodHeadlines.length,
+    sandalwoodMaxCount,
     usdInrRate,
     weatherLine,
     hasQuote: !!quoteText,
     gold24Rate: goldSilver.gold24Rate,
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
+    silverRateKg: goldSilver.silverRateKg,
   });
 
   return payload;
