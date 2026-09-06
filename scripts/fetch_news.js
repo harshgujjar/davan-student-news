@@ -406,7 +406,7 @@ async function runFetchCycle() {
   }
 
   // Max-count config (2026-09-06): portal-side chip selector at
-  // widgetConfig/newsMaxCount lets the admin choose 4-7 headlines per
+  // widgetConfig/newsMaxCount lets the admin choose 1-7 headlines per
   // section, independently per section. Absent (never set, or an older
   // portal build) => 4, same "absent means the old default" convention
   // as pageEnabled/newsOverride elsewhere in this file.
