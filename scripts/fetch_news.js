@@ -1,4 +1,34 @@
 /**
+ * ═══════════════════════════════════════════════════════════════════
+ * BUILD VERSION: v1.2.0
+ * BUILD DATE:    2026-09-07, 03:10 IST
+ * ───────────────────────────────────────────────────────────────────
+ * This header is bumped EVERY time this file is edited — version AND
+ * date/time together, in the same edit as the code change itself. This
+ * is how you tell which build you're looking at / have deployed:
+ * compare this line against whatever you last pushed to GitHub Actions.
+ *
+ * Versioning: MAJOR.MINOR.PATCH
+ *   MAJOR — a source/endpoint is added or removed (e.g. adding Nifty,
+ *           dropping a news source)
+ *   MINOR — new field(s) written to db3, or new fetch logic for an
+ *           existing source
+ *   PATCH — bug fix, wording/comment change, no new data written
+ *
+ * v1.2.0 (2026-09-07) — this build: BharatStock Nifty + CosmyDay
+ *                        horoscope (12 signs) added. See CHANGELOG.
+ * v1.1.0 (2026-09-06) — NEWS_SOURCES multi-source-per-section rework
+ *                        (bollywood/sandalwood added, per-section admin
+ *                        source picker support).
+ * v1.0.0 (2026-08-30) — original India/World/rate/weather/quote/gold/
+ *                        silver GitHub Actions build (this header did
+ *                        not exist yet at the time — v1.0.0 assigned
+ *                        retroactively as the baseline this changelog
+ *                        starts counting from).
+ * ═══════════════════════════════════════════════════════════════════
+ */
+
+/**
  * Davan Student Widget — Page 6 "News & Rates" data fetcher.
  *
  * Runs as a scheduled GITHUB ACTIONS workflow (see
@@ -703,6 +733,39 @@ if (require.main === module) {
 }
 
 module.exports = { runFetchCycle };
+
+/*
+ * ══════════════════ CHANGELOG — full detail ══════════════════
+ * (short summary lives in the BUILD VERSION header at the top of this
+ * file; this is the expanded version for when you need to know exactly
+ * what changed and why)
+ *
+ * v1.2.0 — 2026-09-07, 03:10 IST
+ *   Added: SOURCES.horoscopeApi, SOURCES.horoscopeFallbackApi,
+ *          SOURCES.niftyApi, ZODIAC_SIGNS, pickHoroscopeText(),
+ *          fetchHoroscopes(), fetchNiftyData(). Both wired into the
+ *          Promise.all fetch and the db3 payload (horoscopeBySign,
+ *          horoscopeDate, niftyClose, niftyChangePct, niftyDate).
+ *   Why:   Widget Page 7 (Horoscope & Nifty) needed real data behind it.
+ *   Needs: BHARATSTOCK_API_KEY GitHub secret (Nifty stays hidden without
+ *          it — see setup note 5b below). CosmyDay endpoints were NOT
+ *          independently fetch-verified when this was written — run the
+ *          curl in setup note 5c before trusting the horoscope output.
+ *
+ * v1.1.0 — 2026-09-06
+ *   NEWS_SOURCES reworked from flat indiaRss/worldRss constants to a
+ *   per-section, per-key lookup supporting multiple admin-checkable
+ *   sources. Added bollywoodhungama, filmibeatkannada, bbcindia, toi,
+ *   ndtv, indianexpress, hindustantimes sources. fetchSectionHeadlines()
+ *   replaces the old fetchIndiaHeadlines()/fetchWorldHeadlines() pair.
+ *
+ * v1.0.0 — 2026-08-30 (baseline)
+ *   Original build: India/World RSS, USD/INR (Frankfurter), weather
+ *   (Open-Meteo), daily quote (ZenQuotes), gold/silver (goldprice.dev).
+ *   GitHub Actions + Firebase service-account-key auth, chosen specifically
+ *   to avoid the Blaze billing plan.
+ * ═══════════════════════════════════════════════════════════════════
+ */
 
 /*
  * ══════════════════ SETUP NOTES (GitHub Actions) ══════════════════
