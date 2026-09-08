@@ -1,8 +1,26 @@
 name: Fetch Student News
 on:
   schedule:
+    # Existing 45-min news/rates cycle — headlines, gold/silver, weather,
+    # quote, horoscope, Nifty 50. Runs with STOCK_FETCH unset (falsy), so
+    # runFetchCycle() carries yesterday's Bank Nifty/ROE fields forward
+    # unchanged rather than fetching or wiping them — see fetch_news.js's
+    # isStockFetchRun comment for the full reasoning.
     - cron: '*/45 * * * *'
-  workflow_dispatch: {}
+    # 2026-09-08 — once-daily stock-data cycle (Bank Nifty + ROE
+    # screener), gated behind STOCK_FETCH=true in the job below. 10:30
+    # UTC = 4:00 PM IST, after NSE's 3:30 PM close, so the EOD data is
+    # actually available by the time this runs. Kept as a SEPARATE cron
+    # entry in the SAME workflow (not a second workflow file) per
+    # explicit instruction — both entries trigger the same job, and the
+    # job tells them apart via github.event.schedule below.
+    - cron: '30 10 * * *'
+  workflow_dispatch:
+    inputs:
+      stock_fetch:
+        description: 'Also fetch Bank Nifty + ROE screener this run (normally only the 4pm IST cron does this)'
+        type: boolean
+        default: false
 jobs:
   fetch-news:
     runs-on: ubuntu-latest
@@ -21,4 +39,9 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
           BHARATSTOCK_API_KEY: ${{ secrets.BHARATSTOCK_API_KEY }}
+          # True when this run came from the '30 10 * * *' cron entry
+          # specifically, OR when manually triggered with the stock_fetch
+          # checkbox on — never on the 45-min cron entry, keeping the
+          # once-daily quota promise from fetch_news.js's own comments.
+          STOCK_FETCH: ${{ (github.event.schedule == '30 10 * * *') || (github.event.inputs.stock_fetch == 'true') }}
         run: node fetch_news.js
