@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.2.0
- * BUILD DATE:    2026-09-07, 03:10 IST
+ * BUILD VERSION: v1.3.0
+ * BUILD DATE:    2026-09-08, 14:20 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,8 +15,18 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
- * v1.2.0 (2026-09-07) — this build: BharatStock Nifty + CosmyDay
- *                        horoscope (12 signs) added. See CHANGELOG.
+ * v1.3.0 (2026-09-08) — this build: Bank Nifty + top-5-by-ROE
+ *                        fundamentals screener added, on a NEW once-daily
+ *                        post-market-close trigger (STOCK_FETCH env var)
+ *                        separate from the 45-min news cycle — the
+ *                        45-min cycle now preserves yesterday's stock
+ *                        fields unchanged instead of fetching or wiping
+ *                        them, to stay inside BharatStock's free-tier 50
+ *                        req/day quota. See isStockFetchRun's own
+ *                        comment in runFetchCycle() and fetch-news.yml
+ *                        for the full mechanism.
+ * v1.2.0 (2026-09-07) — BharatStock Nifty + CosmyDay horoscope (12 signs)
+ *                        added.
  * v1.1.0 (2026-09-06) — NEWS_SOURCES multi-source-per-section rework
  *                        (bollywood/sandalwood added, per-section admin
  *                        source picker support).
@@ -209,6 +219,24 @@ const SOURCES = {
   // each trading day. The widget labels this a "Close" for exactly that
   // reason — do not relabel it as a live price.
   niftyApi: 'https://bharatstockapi.com/v1/indices/NIFTY%2050/prices',
+  // 2026-09-08 — Bank Nifty. Same endpoint shape as niftyApi, different
+  // index name. NAME NOT YET LIVE-VERIFIED against a real key — the
+  // BharatStock docs' only worked example is "NIFTY 50" itself; "NIFTY
+  // BANK" is this codebase's best guess at the real name based on how
+  // NSE itself labels the index, but GET /v1/indices (see
+  // fetchBankNiftyData()'s own comment) should be checked once against a
+  // live key before trusting this blindly. If wrong, fetchBankNiftyData()
+  // fails closed (empty fields, Bank Nifty section stays hidden) exactly
+  // like a missing API key does — never a crash, never a wrong number.
+  bankNiftyApi: 'https://bharatstockapi.com/v1/indices/NIFTY%20BANK/prices',
+  // 2026-09-08 — Top-by-ROE fundamentals screener. All NSE stocks, no
+  // sector restriction (explicit admin choice — the screener has no
+  // "is this a Nifty 50 constituent" filter field, only financial
+  // metrics, so restricting to Nifty 50 would need a separate hardcoded
+  // constituent list to cross-reference against; simpler and more
+  // directly supported to screen all NSE stocks by ROE instead).
+  // page_size=5 pulls exactly the top 5, no client-side trimming needed.
+  screenerApi: 'https://bharatstockapi.com/v1/screener?sort_by=roe&sort_order=desc&exchange=NSE&page_size=5',
 };
 
 // The 12 Sun signs, lowercase. These keys MUST match what
@@ -538,20 +566,22 @@ async function fetchHoroscopes() {
 // when niftyClose is empty, so an unconfigured key degrades to "section
 // simply not shown" — never to a broken run, and never to a placeholder
 // number, which on a home screen would read as real market data.
-async function fetchNiftyData() {
-  const empty = { niftyClose: '', niftyChangePct: '', niftyDate: '' };
-  const apiKey = process.env.BHARATSTOCK_API_KEY;
-  if (!apiKey) {
-    console.log('fetchNiftyData: SKIPPED — BHARATSTOCK_API_KEY not set (Nifty section stays hidden)');
-    return empty;
-  }
+//
+// 2026-09-08 — extracted the shared "fetch one index's EOD close + %
+// change" logic into fetchIndexEodChange() below, so Nifty 50 and Bank
+// Nifty don't duplicate the same date-window/sort/prev-close-diff logic
+// twice. fetchNiftyData() itself is now a thin wrapper kept for its
+// existing call site + log-message wording; fetchBankNiftyData() is the
+// same shape with a different SOURCES key and result field names.
+async function fetchIndexEodChange(apiUrl, apiKey, label) {
+  const empty = { close: '', changePct: '', date: '' };
   try {
     // Ask for a short window rather than a single day: markets are closed
     // on weekends and holidays, so "yesterday" is frequently not a
     // trading day at all. Ten days always contains at least two real
     // sessions, which is what the % change needs.
     const from = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
-    const res = await fetchWithTimeout(`${SOURCES.niftyApi}?from=${from}`, {
+    const res = await fetchWithTimeout(`${apiUrl}?from=${from}`, {
       headers: { 'X-API-Key': apiKey },
     });
     const json = await res.json();
@@ -575,13 +605,76 @@ async function fetchNiftyData() {
       changePct = (pct >= 0 ? '+' : '') + pct.toFixed(2);
     }
     return {
-      niftyClose: close.toFixed(2),
-      niftyChangePct: changePct,
-      niftyDate: String((latest && latest.trade_date) || ''),
+      close: close.toFixed(2),
+      changePct,
+      date: String((latest && latest.trade_date) || ''),
     };
   } catch (e) {
-    console.error('fetchNiftyData FAILED:', e.message);
+    console.error(`fetchIndexEodChange(${label}) FAILED:`, e.message);
     return empty;
+  }
+}
+
+async function fetchNiftyData() {
+  const empty = { niftyClose: '', niftyChangePct: '', niftyDate: '' };
+  const apiKey = process.env.BHARATSTOCK_API_KEY;
+  if (!apiKey) {
+    console.log('fetchNiftyData: SKIPPED — BHARATSTOCK_API_KEY not set (Nifty section stays hidden)');
+    return empty;
+  }
+  const r = await fetchIndexEodChange(SOURCES.niftyApi, apiKey, 'NIFTY 50');
+  return { niftyClose: r.close, niftyChangePct: r.changePct, niftyDate: r.date };
+}
+
+// 2026-09-08 — Bank Nifty. Same key-gating and empty-on-failure contract
+// as fetchNiftyData() above. ONLY CALLED from the once-daily post-market
+// stock-fetch trigger (see runFetchCycle()'s isStockFetchRun gate below),
+// never the 45-min news cycle — free BharatStock tier is 50 requests/day,
+// and 45-min x 2 index calls alone would be ~96/day, already over budget
+// before the screener call is even counted.
+async function fetchBankNiftyData() {
+  const empty = { bankNiftyClose: '', bankNiftyChangePct: '', bankNiftyDate: '' };
+  const apiKey = process.env.BHARATSTOCK_API_KEY;
+  if (!apiKey) {
+    console.log('fetchBankNiftyData: SKIPPED — BHARATSTOCK_API_KEY not set (Bank Nifty section stays hidden)');
+    return empty;
+  }
+  const r = await fetchIndexEodChange(SOURCES.bankNiftyApi, apiKey, 'NIFTY BANK');
+  return { bankNiftyClose: r.close, bankNiftyChangePct: r.changePct, bankNiftyDate: r.date };
+}
+
+// 2026-09-08 — Top-5-by-ROE fundamentals screener, all NSE stocks. Same
+// key-gating/fail-closed contract as the index fetchers above. ONLY
+// CALLED from the once-daily post-market stock-fetch trigger, same quota
+// reasoning as fetchBankNiftyData().
+async function fetchTopROEStocks() {
+  const apiKey = process.env.BHARATSTOCK_API_KEY;
+  if (!apiKey) {
+    console.log('fetchTopROEStocks: SKIPPED — BHARATSTOCK_API_KEY not set (ROE table stays hidden)');
+    return [];
+  }
+  try {
+    const res = await fetchWithTimeout(SOURCES.screenerApi, {
+      headers: { 'X-API-Key': apiKey },
+    });
+    const json = await res.json();
+    // /v1/screener documents a { data, pagination } envelope — same
+    // defensive either-shape handling as the index endpoints above, in
+    // case that ever changes.
+    const rows = Array.isArray(json) ? json : (json && Array.isArray(json.data) ? json.data : []);
+    return rows.slice(0, 5).map(r => ({
+      symbol: String(r.symbol || ''),
+      // price/roe/pe_ratio are plain numbers in the API response — format
+      // once here so the widget does zero number-formatting of its own,
+      // same "format server-side, display client-side" contract as every
+      // other numeric field in this file.
+      price: Number.isFinite(Number(r.price)) ? Number(r.price).toLocaleString('en-IN') : '',
+      roe: Number.isFinite(Number(r.roe)) ? Number(r.roe).toFixed(1) : '',
+      peRatio: Number.isFinite(Number(r.pe_ratio)) ? Number(r.pe_ratio).toFixed(1) : '',
+    })).filter(r => r.symbol); // drop any row missing even a symbol — never show a blank row
+  } catch (e) {
+    console.error('fetchTopROEStocks FAILED:', e.message);
+    return [];
   }
 }
 
@@ -639,6 +732,11 @@ async function runFetchCycle() {
   // functions here are failure-isolated (they catch internally and
   // return a safe empty value), so Promise.all is safe: none of them
   // ever reject.
+  //
+  // 2026-09-08 — Bank Nifty / ROE screener are DELIBERATELY NOT in this
+  // Promise.all. They only run on the once-daily post-market-close
+  // trigger (isStockFetchRun below), never the 45-min news cycle — see
+  // that flag's own comment for the full BharatStock-quota reasoning.
   const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty] = await Promise.all([
     fetchSectionHeadlines('india', indiaSources, indiaMaxCount),
     fetchSectionHeadlines('world', worldSources, worldMaxCount),
@@ -654,6 +752,54 @@ async function runFetchCycle() {
     fetchHoroscopes(),
     fetchNiftyData(),
   ]);
+
+  // 2026-09-08 — is this the once-daily stock-data run? Driven by the
+  // second cron trigger in the workflow YAML (see setup notes at the
+  // bottom of this file), which passes STOCK_FETCH=true as an env var.
+  // Also allow a manual workflow_dispatch override via the same env var,
+  // so Harsha can force a stock refresh on demand without waiting for
+  // the schedule (useful right after adding/rotating the BharatStock
+  // key, or after fixing the Bank Nifty index name below).
+  const isStockFetchRun = process.env.STOCK_FETCH === 'true';
+
+  // CRITICAL: this whole ref is .set() (full overwrite), not .update() —
+  // see the write a few lines below. On a plain 45-min NEWS run,
+  // bankNiftyClose/roeStocks are never fetched (empty by default), and a
+  // naive .set() would WIPE OUT that day's stock data within 45 minutes
+  // of the stock run having written it — the exact same "silently
+  // discarded every cycle" failure class documented all over this
+  // widget's Kotlin side (StudentWidgetPrefs.kt), just on the write side
+  // instead of the cache side this time. FIX: on a non-stock run, read
+  // the EXISTING node first and carry its bankNifty*/roeStocks fields
+  // forward unchanged, so only the stock-fetch run ever actually changes
+  // them.
+  let bankNifty = { bankNiftyClose: '', bankNiftyChangePct: '', bankNiftyDate: '' };
+  let roeStocks = [];
+  if (isStockFetchRun) {
+    [bankNifty, roeStocks] = await Promise.all([
+      fetchBankNiftyData(),
+      fetchTopROEStocks(),
+    ]);
+  } else {
+    try {
+      const existingSnap = await admin.database().ref('widgetConfig/news').once('value');
+      const existing = existingSnap.val() || {};
+      bankNifty = {
+        bankNiftyClose: existing.bankNiftyClose || '',
+        bankNiftyChangePct: existing.bankNiftyChangePct || '',
+        bankNiftyDate: existing.bankNiftyDate || '',
+      };
+      roeStocks = Array.isArray(existing.roeStocks) ? existing.roeStocks : [];
+    } catch (e) {
+      // Read failure here just means this cycle's stock fields go blank
+      // for one run (same fail-safe-empty contract as every fetch*()
+      // function above) rather than blocking the whole news write —
+      // headlines/gold/silver/horoscope are far more time-sensitive than
+      // a once-a-day stock table staying visible for one extra 45-min
+      // cycle.
+      console.warn('runFetchCycle: could not read existing stock fields to preserve them:', e.message);
+    }
+  }
 
   const payload = {
     indiaHeadlines,
@@ -677,6 +823,13 @@ async function runFetchCycle() {
     niftyClose: nifty.niftyClose,
     niftyChangePct: nifty.niftyChangePct,
     niftyDate: nifty.niftyDate,
+    // 2026-09-08 — Bank Nifty / ROE screener. See isStockFetchRun above:
+    // freshly fetched on the once-daily stock run, carried forward
+    // unchanged on every other run in between.
+    bankNiftyClose: bankNifty.bankNiftyClose,
+    bankNiftyChangePct: bankNifty.bankNiftyChangePct,
+    bankNiftyDate: bankNifty.bankNiftyDate,
+    roeStocks,
     fetchedAt: Date.now(),
   };
 
@@ -710,6 +863,17 @@ async function runFetchCycle() {
     niftyClose: nifty.niftyClose,
     niftyChangePct: nifty.niftyChangePct,
     niftyDate: nifty.niftyDate,
+    // 2026-09-08 — isStockFetchRun tells you at a glance from the Actions
+    // log alone whether THIS run was expected to refresh stock data or
+    // just carry yesterday's forward — bankNiftyClose/roeStocks empty on
+    // a non-stock run is normal, not a bug, and this line is what
+    // distinguishes the two cases without needing to check the workflow
+    // trigger separately.
+    isStockFetchRun,
+    bankNiftyClose: bankNifty.bankNiftyClose,
+    bankNiftyChangePct: bankNifty.bankNiftyChangePct,
+    bankNiftyDate: bankNifty.bankNiftyDate,
+    roeStocksCount: roeStocks.length,
   });
 
   return payload;
@@ -739,6 +903,36 @@ module.exports = { runFetchCycle };
  * (short summary lives in the BUILD VERSION header at the top of this
  * file; this is the expanded version for when you need to know exactly
  * what changed and why)
+ *
+ * v1.3.0 — 2026-09-08, 14:20 IST
+ *   Added: SOURCES.bankNiftyApi, SOURCES.screenerApi,
+ *          fetchIndexEodChange() (shared logic extracted from
+ *          fetchNiftyData(), which is now a thin wrapper around it),
+ *          fetchBankNiftyData(), fetchTopROEStocks(). New STOCK_FETCH
+ *          env var / isStockFetchRun gate in runFetchCycle() — Bank
+ *          Nifty and the ROE screener are fetched ONLY on the new
+ *          once-daily post-market-close cron trigger, never the 45-min
+ *          news cycle. New fields written to db3:
+ *          bankNiftyClose/bankNiftyChangePct/bankNiftyDate, roeStocks
+ *          (array of 5 {symbol,price,roe,peRatio} objects).
+ *   Why:   Free BharatStock tier is 50 requests/day. The 45-min news
+ *          cycle already spends 1 call/run on Nifty 50 alone (~32/day);
+ *          adding 2 more index/screener calls to that SAME cycle would
+ *          have meant ~96/day, nearly double the limit. A separate
+ *          once-daily trigger spends exactly 2 calls/day instead.
+ *   Fixed: runFetchCycle() writes via a full .set() on widgetConfig/news,
+ *          not a merge — without a fix, every 45-min NEWS-only run would
+ *          have silently overwritten Bank Nifty/ROE with empty values
+ *          within 45 minutes of the once-daily run having set them. Now
+ *          a non-stock run reads back the existing node's stock fields
+ *          first and carries them forward unchanged.
+ *   Also fixed: this file's own setup notes previously said BharatStock's
+ *          free tier was 100 requests/day — verified against BharatStock's
+ *          actual pricing page and corrected to 50/day (see setup note 5b).
+ *   Needs: Bank Nifty's exact index name ("NIFTY BANK") is an EDUCATED
+ *          GUESS, not yet verified against a live key — see setup note 5d
+ *          for the exact curl command to confirm it before trusting the
+ *          output.
  *
  * v1.2.0 — 2026-09-07, 03:10 IST
  *   Added: SOURCES.horoscopeApi, SOURCES.horoscopeFallbackApi,
@@ -838,10 +1032,15 @@ module.exports = { runFetchCycle };
  * 5b. (2026-09-07) NIFTY — OPTIONAL, add whenever you want it. Until this
  *    is done, fetchNiftyData() logs "SKIPPED" and the widget hides the
  *    Nifty block entirely. Nothing else is affected.
- *      - Get a key at https://bharatstockapi.com — the FREE tier (Rs 0,
- *        100 requests/day) is sufficient: this script runs every 45-60
- *        min (~24-32 runs/day) and Nifty costs ONE call per run. Do not
- *        pay for a higher tier for this use.
+ *      - Get a key at https://bharatstockapi.com — the FREE tier is
+ *        50 requests/day (CORRECTED 2026-09-08 — an earlier version of
+ *        this note said 100, which was wrong; verified directly against
+ *        BharatStock's own pricing page). This script's 45-min news
+ *        cycle (~32 runs/day) spends exactly ONE call/run on Nifty 50 —
+ *        well inside the 50/day budget on its own. Do not pay for a
+ *        higher tier for this alone; see 5d below for why Bank Nifty/ROE
+ *        needed a SEPARATE once-daily trigger rather than joining this
+ *        same 45-min cycle.
  *      - GENERATE A NEW KEY. Do NOT reuse the old bsk_live_... key — it
  *        was pasted into a chat session and must be treated as
  *        compromised. Revoke it in the dashboard while you are there.
@@ -867,6 +1066,42 @@ module.exports = { runFetchCycle };
  *    assuming the primary is fine. After a run, confirm db3 has
  *    widgetConfig/news/horoscopeBySign with 12 entries BEFORE expecting
  *    anything to appear on the widget's Page 7.
+ *
+ * 5d. (2026-09-08) BANK NIFTY + ROE SCREENER — OPTIONAL, same
+ *    BHARATSTOCK_API_KEY as 5b covers both, no separate key needed. Two
+ *    things to verify before trusting this section:
+ *      - BANK NIFTY INDEX NAME NOT YET LIVE-VERIFIED. SOURCES.bankNiftyApi
+ *        guesses the name is "NIFTY BANK" — BharatStock's own docs only
+ *        show "NIFTY 50" as a worked example. Confirm the real name once
+ *        with a live key:
+ *            curl "https://bharatstockapi.com/v1/indices?category=BROAD%20MARKET%20INDICES" \
+ *              -H "X-API-Key: YOUR_KEY"
+ *        and look for the Bank Nifty entry's exact "name" field. If it
+ *        differs from "NIFTY BANK", update SOURCES.bankNiftyApi's URL to
+ *        match — fetchBankNiftyData() fails closed (empty fields, section
+ *        stays hidden) if the name is wrong, so a mismatch here shows up
+ *        as "Bank Nifty just never appears" rather than a crash, and
+ *        won't be obvious without checking the Actions log for a
+ *        "fetchIndexEodChange(NIFTY BANK) FAILED" line.
+ *      - QUOTA: this section runs ONLY on the once-daily "30 10 * * *"
+ *        (4pm IST, after NSE close) cron entry in fetch-news.yml — NOT
+ *        the 45-min news cycle. This was a deliberate, explicit decision:
+ *        the 45-min cycle already spends 1 call/run (~32/day) on Nifty
+ *        50 alone; adding Bank Nifty + the screener to that SAME cycle
+ *        would be 3 calls x 32 runs = 96/day, nearly double the free
+ *        tier's 50/day limit. The once-daily trigger instead spends
+ *        exactly 2 calls/day (Bank Nifty + screener), leaving huge
+ *        headroom. On every OTHER run in between, runFetchCycle() reads
+ *        back whatever the once-daily run last wrote and carries it
+ *        forward unchanged — see isStockFetchRun's own comment in
+ *        runFetchCycle() for exactly how.
+ *      - MANUAL TEST: Actions tab -> "Fetch Student News" -> "Run
+ *        workflow" -> tick the "stock_fetch" checkbox before running, to
+ *        force a stock refresh on demand instead of waiting for 4pm IST.
+ *      - Confirm db3 has widgetConfig/news/bankNiftyClose and
+ *        /roeStocks (an array of 5 {symbol,price,roe,peRatio} objects)
+ *        populated after a stock-fetch run, same as step 7 below for the
+ *        rest of the payload.
  *
  * 7. TESTING: after pushing, go to the repo's Actions tab → the
  *    "Fetch Student News" workflow → "Run workflow" (manual trigger
