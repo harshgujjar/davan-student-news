@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.3.1
- * BUILD DATE:    2026-09-08, 16:05 IST
+ * BUILD VERSION: v1.3.2
+ * BUILD DATE:    2026-09-08, 18:40 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,22 +15,30 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
- * v1.3.1 (2026-09-08) — this build: PATCH fix for the ROE screener. A
- *                        live test on v1.3.0 with NO quality filters
- *                        returned nonsensical ROE values (2509%, 604%,
- *                        336% — distorted ratios from tiny/near-
- *                        worthless-equity companies). Added
- *                        market_cap.gt.20000 (Crores) and
- *                        debt_to_equity.lt.1 filters to SOURCES.screenerApi,
- *                        plus a belt-and-suspenders >100% ROE sanity
- *                        guard inside fetchTopROEStocks() in case the
- *                        filters= query encoding turns out to be wrong
- *                        (UNVERIFIED — see that function and
- *                        SOURCES.screenerApi's own comments for three
- *                        possible encodings to try if this still fails).
- *                        Confirmed via a live test: Bank Nifty's index
- *                        name IS correctly "NIFTY BANK" (v1.3.0's guess
- *                        was right) — no change needed there.
+ * v1.3.2 (2026-09-08) — this build: the screener's server-side filters=
+ *                        param is CONFIRMED NON-FUNCTIONAL after live
+ *                        testing 3 different encodings, all returning
+ *                        identical unfiltered results. Switched to
+ *                        client-side filtering: SOURCES.screenerApi now
+ *                        pulls page_size=100 sorted by market_cap desc
+ *                        (no filters= param at all), and
+ *                        fetchTopROEStocks() applies market_cap>=20000Cr
+ *                        + debt_to_equity<=1 + 0<=ROE<=100% filters in
+ *                        JS, then sorts the qualified subset by ROE desc
+ *                        itself. Verified against real sample data
+ *                        (RELIANCE/TCS/HDFCBANK/TITAN etc.) before
+ *                        shipping — correctly surfaces real large-cap
+ *                        names (TCS 45.6%, TITAN 32.3%, INFY 31.6%,
+ *                        HINDUNILVR 30.7%, ITC 28.8% in one test run)
+ *                        and correctly excludes the junk symbols
+ *                        (SUPREMEINF 2509% ROE etc.) that a bare
+ *                        sort_by=roe with no market-cap floor surfaces.
+ * v1.3.1 (2026-09-08) — PATCH fix for the ROE screener (superseded by
+ *                        v1.3.2 above — the market_cap/debt_to_equity
+ *                        filters= param added here turned out to not
+ *                        actually work; kept for changelog continuity).
+ *                        Confirmed Bank Nifty's index name IS "NIFTY
+ *                        BANK" (still correct, unaffected by this).
  * v1.3.0 (2026-09-08) — Bank Nifty + top-5-by-ROE fundamentals
  *                        screener added, on a NEW once-daily
  *                        post-market-close trigger (STOCK_FETCH env var)
@@ -255,26 +263,47 @@ const SOURCES = {
   // (Bajaj Auto/Titan/Eicher-style large caps): market_cap > 20,000 Cr,
   // debt_to_equity < 1.0.
   //
-  // FILTER SYNTAX NOT INDEPENDENTLY VERIFIED AS A RAW QUERY STRING.
-  // The OFFICIAL bharatstock Python client (pypi.org/project/bharatstock)
-  // documents filters as an array of "metric.operator.value" strings,
-  // e.g. filters=["pe_ratio.lt.15","roe.gt.18","market_cap.gt.10000"],
-  // passed to client.screener.run(filters=[...]) — that array shape is
-  // confirmed from BharatStock's own client docs, but the client library
-  // may translate it into a DIFFERENT wire format than the repeated
-  // ?filters=...&filters=... query params used below (e.g. it could
-  // instead send one JSON-encoded array, or a single comma-joined
-  // string). If fetchTopROEStocks() logs a FAILED line after pushing
-  // this, try these encodings in order:
-  //   1. ?filters[]=market_cap.gt.20000&filters[]=debt_to_equity.lt.1
-  //   2. ?filters=market_cap.gt.20000,debt_to_equity.lt.1 (comma-joined)
+  // FILTER PARAM CONFIRMED NON-FUNCTIONAL (2026-09-08, live testing).
+  // All three encodings the OFFICIAL bharatstock Python client's docs
+  // could plausibly translate to were tested directly with curl against
+  // a live key, using IDENTICAL market_cap.gt.20000 /
+  // debt_to_equity.lt.1 filter values each time:
+  //   1. ?filters=market_cap.gt.20000&filters=debt_to_equity.lt.1
+  //   2. ?filters[]=market_cap.gt.20000&filters[]=debt_to_equity.lt.1
   //   3. ?filters=%5B%22market_cap.gt.20000%22%2C%22debt_to_equity.lt.1%22%5D
   //      (URL-encoded JSON array, exactly mirroring the Python client's
   //      own input shape)
-  // market_cap filter value is in CRORES per the client docs' explicit
-  // note (20000 = 20,000 Cr), NOT rupees — do not multiply by 1e7 here.
-  // page_size=5 pulls exactly the top 5, no client-side trimming needed.
-  screenerApi: 'https://bharatstockapi.com/v1/screener?filters=market_cap.gt.20000&filters=debt_to_equity.lt.1&sort_by=roe&sort_order=desc&exchange=NSE&page_size=5',
+  // All three returned the IDENTICAL unfiltered result set (same 5 junk
+  // symbols each time — SUPREMEINF/MBECL/GAYAPROJ/ROML/ROLLT, market_cap
+  // in the hundreds of Crores, debt_to_equity as high as 11.86 — nowhere
+  // near the requested filters), and total_items was unchanged at 2571
+  // across all three, versus 5262 for a completely bare call — meaning
+  // the filters= param has NO effect on the raw REST endpoint in any
+  // tested form. The Python client's filters=[...] array must be doing
+  // something the client library handles itself (client-side filtering
+  // after fetch, or an entirely different wire parameter this project
+  // hasn't found) rather than something the bare REST endpoint honours.
+  //
+  // FIX: filter and sort CLIENT-SIDE in fetchTopROEStocks() instead of
+  // trusting any server-side filters= param. sort_by=market_cap (NOT
+  // roe) pulls the biggest companies first — a live bare-call sample
+  // confirmed real large caps (RELIANCE, TCS, HDFCBANK, TITAN, etc.) all
+  // have clean, sane ROE (8-45% range) once you're actually looking at
+  // real companies rather than an unsorted, unfiltered universe — so
+  // sorting by market_cap first, THEN filtering/sorting the page by ROE
+  // ourselves, reliably surfaces exactly the kind of results the
+  // now-nonfunctional filters= param was meant to produce.
+  // page_size=100 is comfortably enough large-cap names (NSE's market
+  // cap distribution is steep — the top ~100 by market_cap already
+  // covers everything above roughly ₹20,000 Cr with room to spare) to
+  // find 5 that also pass the debt_to_equity < 1 check without needing
+  // pagination.
+  // market_cap filter THRESHOLD (used client-side now, not as a query
+  // param) is in CRORES per the client docs' explicit note (20000 =
+  // 20,000 Cr) AND confirmed directly from a live sample (RELIANCE's
+  // market_cap field read 1752388.17, i.e. ~₹17.5 lakh Cr, matching its
+  // real-world market cap) — do not multiply by 1e7 in the JS filter.
+  screenerApi: 'https://bharatstockapi.com/v1/screener?sort_by=market_cap&sort_order=desc&exchange=NSE&page_size=100',
 };
 
 // The 12 Sun signs, lowercase. These keys MUST match what
@@ -681,11 +710,18 @@ async function fetchBankNiftyData() {
   return { bankNiftyClose: r.close, bankNiftyChangePct: r.changePct, bankNiftyDate: r.date };
 }
 
-// 2026-09-08 — Top-5-by-ROE fundamentals screener, quality-filtered (see
-// SOURCES.screenerApi's own comment for the filter values and the
-// unverified-encoding caveat). Same key-gating/fail-closed contract as
-// the index fetchers above. ONLY CALLED from the once-daily post-market
-// stock-fetch trigger, same quota reasoning as fetchBankNiftyData().
+// 2026-09-08 — Top-5-by-ROE fundamentals screener, quality-filtered
+// CLIENT-SIDE (see SOURCES.screenerApi's own comment for why: the
+// server-side filters= query param was live-tested in three different
+// encodings and confirmed to have NO effect on this endpoint). Same
+// key-gating/fail-closed contract as the index fetchers above. ONLY
+// CALLED from the once-daily post-market stock-fetch trigger, same
+// quota reasoning as fetchBankNiftyData() — this is still exactly ONE
+// API call, just page_size=100 instead of 5, so the quota math is
+// unchanged.
+const ROE_MIN_MARKET_CAP_CRORES = 20000;
+const ROE_MAX_DEBT_TO_EQUITY = 1;
+
 async function fetchTopROEStocks() {
   const apiKey = process.env.BHARATSTOCK_API_KEY;
   if (!apiKey) {
@@ -701,24 +737,30 @@ async function fetchTopROEStocks() {
     // defensive either-shape handling as the index endpoints above, in
     // case that ever changes.
     const rows = Array.isArray(json) ? json : (json && Array.isArray(json.data) ? json.data : []);
-    const result = rows
-      // 2026-09-08 — belt-and-suspenders sanity guard, IN ADDITION TO the
-      // market_cap/debt_to_equity filters in SOURCES.screenerApi, not a
-      // replacement for them. If the filters= query param encoding turns
-      // out to be wrong (see that URL's own comment — three possible
-      // encodings are untested), the API may silently ignore an
-      // unrecognised filters param rather than erroring, which would
-      // bring back exactly the distorted-ROE junk this was built to
-      // avoid (a live unfiltered test returned 2509%/604%/336% ROE
-      // values from near-worthless-equity companies). A sane real-world
-      // ROE essentially never exceeds 100% for a going concern with a
-      // market cap in the tens of thousands of Crores; anything above
-      // that is dropped here rather than shown, even if the query-level
-      // filter was supposed to have excluded it already.
-      .filter(r => {
-        const roeNum = Number(r.roe);
-        return Number.isFinite(roeNum) && roeNum >= 0 && roeNum <= 100;
-      })
+    const qualified = rows.filter(r => {
+      // ALL THREE filtering conditions applied here in JS, since the
+      // server-side filters= param does nothing (see SOURCES.screenerApi
+      // comment for the live-test evidence): market cap floor and
+      // debt/equity ceiling (the two quality filters explicitly
+      // requested), PLUS the >100% ROE sanity guard kept as a second
+      // layer of protection — a real going concern with a market cap in
+      // the tens of thousands of Crores essentially never has triple or
+      // quadruple digit ROE, so this also catches any data-quality
+      // oddity the market_cap/debt_to_equity filters alone might miss.
+      const mcap = Number(r.market_cap);
+      const dte = Number(r.debt_to_equity);
+      const roeNum = Number(r.roe);
+      return (
+        Number.isFinite(mcap) && mcap >= ROE_MIN_MARKET_CAP_CRORES &&
+        Number.isFinite(dte) && dte >= 0 && dte <= ROE_MAX_DEBT_TO_EQUITY &&
+        Number.isFinite(roeNum) && roeNum >= 0 && roeNum <= 100
+      );
+    });
+    // sort_by=market_cap in the query gave us the page sorted by size,
+    // not by ROE — re-sort the QUALIFIED subset by ROE desc ourselves,
+    // since ROE is what "Top by ROE" is supposed to mean.
+    qualified.sort((a, b) => Number(b.roe) - Number(a.roe));
+    const result = qualified
       .slice(0, 5)
       .map(r => ({
         symbol: String(r.symbol || ''),
@@ -732,13 +774,15 @@ async function fetchTopROEStocks() {
       }))
       .filter(r => r.symbol); // drop any row missing even a symbol — never show a blank row
     if (rows.length && !result.length) {
-      // Every row came back and was then filtered out entirely — almost
-      // certainly means the query-level filters= param was ignored or
-      // mis-encoded (see the "if FAILED" note in SOURCES.screenerApi)
-      // and the >100% ROE guard above caught all of them. Worth a loud
-      // log line rather than silently returning an empty table with no
-      // clue why.
-      console.warn(`fetchTopROEStocks: got ${rows.length} rows but ALL were filtered out by the >100% ROE sanity guard — check SOURCES.screenerApi's filters= encoding, it likely was not applied by the API`);
+      // Every row came back but none passed the market_cap/debt_to_equity/
+      // ROE checks above — with page_size=100 sorted by market_cap desc,
+      // this would mean even the 100 biggest NSE companies failed the
+      // debt/equity < 1 bar, which is surprising enough to be worth a
+      // loud log line rather than a silently empty table. Could mean the
+      // debt/equity threshold is too strict for current market
+      // conditions, or that market_cap/debt_to_equity field names or
+      // units have changed server-side.
+      console.warn(`fetchTopROEStocks: got ${rows.length} rows (page_size=100, sorted by market_cap) but NONE passed market_cap>=${ROE_MIN_MARKET_CAP_CRORES}Cr + debt_to_equity<=${ROE_MAX_DEBT_TO_EQUITY} + ROE 0-100% — check whether the debt/equity threshold is too strict, or whether field names/units changed`);
     }
     return result;
   } catch (e) {
@@ -898,6 +942,24 @@ async function runFetchCycle() {
     bankNiftyClose: bankNifty.bankNiftyClose,
     bankNiftyChangePct: bankNifty.bankNiftyChangePct,
     bankNiftyDate: bankNifty.bankNiftyDate,
+    // 2026-09-08 — roeStocks: NOTE that RTDB (unlike a real JSON store)
+    // has no first-class empty-array representation — writing a bare []
+    // here collapses to "no node written" rather than "an empty node",
+    // confirmed via a live comparison (this function's own "wrote to
+    // db3" log correctly showed roeStocks: [] in memory, but a direct
+    // db3Get read of the actual written node moments later showed the
+    // key fully ABSENT). This is expected/harmless, NOT a bug: both
+    // StudentNewsConfig.parseSnapshot() (widget) and the portal's
+    // db3Get-based Nifty tab already treat "key missing" identically to
+    // "key present with an empty array" — see parseSnapshot()'s
+    // `for (c in snapshot.child("roeStocks").children)` loop, which
+    // simply iterates zero times over a missing/empty node either way.
+    // So an empty roeStocks write looking "absent" in the Firebase
+    // console is the correct, harmless outcome of this write — the
+    // REAL question when the table is empty is always "why did
+    // fetchTopROEStocks() return zero rows", not "why didn't the key
+    // get written" (see that function's own >100% ROE guard comment and
+    // the FAILED/ALL-filtered-out console lines for how to diagnose that).
     roeStocks,
     fetchedAt: Date.now(),
   };
@@ -972,6 +1034,29 @@ module.exports = { runFetchCycle };
  * (short summary lives in the BUILD VERSION header at the top of this
  * file; this is the expanded version for when you need to know exactly
  * what changed and why)
+ *
+ * v1.3.2 — 2026-09-08, 18:40 IST
+ *   Confirmed via live curl testing: the /v1/screener filters= query
+ *   param has NO effect on this endpoint, in any of 3 tested encodings
+ *   (repeated ?filters=...&filters=..., ?filters[]=...&filters[]=...,
+ *   and a URL-encoded JSON array matching the official Python client's
+ *   filters=[...] input shape). All three returned an IDENTICAL
+ *   unfiltered result set (same junk symbols, same total_items count)
+ *   regardless of the filter values passed.
+ *   Fixed: SOURCES.screenerApi now requests page_size=100 sorted by
+ *   market_cap desc, with NO filters= param at all. fetchTopROEStocks()
+ *   applies market_cap>=20000 (Cr) + debt_to_equity<=1 + 0<=ROE<=100%
+ *   filtering entirely in JS, then sorts the qualified subset by ROE
+ *   desc itself (the market_cap sort from the query is just to bias the
+ *   100-row page toward large caps, not the final display order).
+ *   Verified against real sample data before shipping — correctly
+ *   surfaces large-cap names with sane ROE (TCS 45.6%, TITAN 32.3%,
+ *   INFY 31.6%, HINDUNILVR 30.7%, ITC 28.8% in one test) and correctly
+ *   excludes the distorted-ratio junk (SUPREMEINF 2509% ROE etc.) a bare
+ *   roe-desc sort surfaces.
+ *   API call count UNCHANGED: still exactly 1 call for the screener
+ *   (page_size=100 vs 5 doesn't cost extra requests), so the once-daily
+ *   stock-fetch quota math from v1.3.0 is unaffected.
  *
  * v1.3.1 — 2026-09-08, 16:05 IST
  *   Fixed: SOURCES.screenerApi had no quality filters — a live test
@@ -1167,20 +1252,18 @@ module.exports = { runFetchCycle };
  *        category as plain "NIFTY 50" — NOT "BROAD MARKET INDICES" or
  *        "SECTORAL INDICES", which is where the natural first guesses
  *        looked and came back empty.
- *      - ROE SCREENER FILTERS: market_cap.gt.20000 (Crores) and
- *        debt_to_equity.lt.1 are applied, per an explicit decision after
- *        an unfiltered version returned nonsensical ROE values (2509%,
- *        604%, 336% — distorted ratios from tiny/near-worthless-equity
- *        companies). THE RAW-REST filters= QUERY ENCODING IS STILL
- *        UNVERIFIED — BharatStock's own Python client documents filters
- *        as an array (filters=["metric.op.value", ...]) but the exact
- *        wire format a bare curl/fetch call should use for that array is
- *        not confirmed. Check the Actions log after a stock-fetch run:
- *        if you see "fetchTopROEStocks: got N rows but ALL were filtered
- *        out", the filters= param was likely ignored by the API (results
- *        came back unfiltered and the >100% ROE safety guard caught
- *        them all) — try the alternate encodings listed in
- *        SOURCES.screenerApi's own comment.
+ *      - ROE SCREENER FILTERS: market_cap>=20000 (Crores) and
+ *        debt_to_equity<=1 are applied entirely CLIENT-SIDE in
+ *        fetchTopROEStocks() — the /v1/screener filters= query param was
+ *        CONFIRMED NON-FUNCTIONAL via live curl testing (2026-09-08),
+ *        3 different encodings tried, all returned identical unfiltered
+ *        results. SOURCES.screenerApi now just requests page_size=100
+ *        sorted by market_cap desc (biasing the page toward large caps),
+ *        and the actual filtering/sorting-by-ROE happens in JS. If this
+ *        ever needs adjusting, edit ROE_MIN_MARKET_CAP_CRORES /
+ *        ROE_MAX_DEBT_TO_EQUITY near fetchTopROEStocks() directly —
+ *        do NOT try adding a filters= param back to the URL, it will be
+ *        silently ignored by the API.
  *      - QUOTA: this section runs ONLY on the once-daily "30 10 * * *"
  *        (4pm IST, after NSE close) cron entry in fetch-news.yml — NOT
  *        the 45-min news cycle. This was a deliberate, explicit decision:
