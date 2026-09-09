@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.3.2
- * BUILD DATE:    2026-09-08, 18:40 IST
+ * BUILD VERSION: v1.4.0
+ * BUILD DATE:    2026-09-09, 12:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,24 +15,32 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
- * v1.3.2 (2026-09-08) — this build: the screener's server-side filters=
- *                        param is CONFIRMED NON-FUNCTIONAL after live
- *                        testing 3 different encodings, all returning
- *                        identical unfiltered results. Switched to
- *                        client-side filtering: SOURCES.screenerApi now
- *                        pulls page_size=100 sorted by market_cap desc
- *                        (no filters= param at all), and
- *                        fetchTopROEStocks() applies market_cap>=20000Cr
- *                        + debt_to_equity<=1 + 0<=ROE<=100% filters in
- *                        JS, then sorts the qualified subset by ROE desc
- *                        itself. Verified against real sample data
- *                        (RELIANCE/TCS/HDFCBANK/TITAN etc.) before
- *                        shipping — correctly surfaces real large-cap
- *                        names (TCS 45.6%, TITAN 32.3%, INFY 31.6%,
- *                        HINDUNILVR 30.7%, ITC 28.8% in one test run)
- *                        and correctly excludes the junk symbols
- *                        (SUPREMEINF 2509% ROE etc.) that a bare
- *                        sort_by=roe with no market-cap floor surfaces.
+ * v1.4.0 (2026-09-09) — this build: MINOR, two changes.
+ *   1. roeStocks' price field switched from toLocaleString('en-IN') back
+ *      to plain toFixed(2) (no comma grouping) — confirmed on a real
+ *      device that comma punctuation breaks the widget's fixed-width
+ *      monospace table alignment (some Android "monospace" font
+ *      fallbacks don't render commas at the same width as digits).
+ *      Comma-formatting stays correct on the standalone Nifty/Bank
+ *      Nifty lines (StudentWidgetRenderer.kt's own
+ *      formatIndianRupeesDecimal), which aren't inside a fixed-width
+ *      table.
+ *   2. New roeComputedDate field: the actual date roeStocks was
+ *      computed (from the first row's own computed_at), separate from
+ *      the top-level fetchedAt timestamp — fetchedAt is Date.now() on
+ *      EVERY run including 45-min news-only cycles, so it always said
+ *      "today" even on a day the once-daily stock fetch didn't run.
+ *      roeComputedDate only changes when roeStocks itself actually
+ *      changes, carried forward on non-stock runs the same way
+ *      bankNiftyClose/roeStocks already are.
+ * v1.3.2 (2026-09-08) — confirmed via live curl testing: the
+ *                        /v1/screener filters= query param has NO
+ *                        effect on this endpoint (3 encodings tested,
+ *                        all identical unfiltered results). Switched to
+ *                        client-side filtering: page_size=100 sorted by
+ *                        market_cap desc, then market_cap>=20000Cr +
+ *                        debt_to_equity<=1 + 0<=ROE<=100% filtering and
+ *                        ROE-desc sorting done entirely in JS.
  * v1.3.1 (2026-09-08) — PATCH fix for the ROE screener (superseded by
  *                        v1.3.2 above — the market_cap/debt_to_equity
  *                        filters= param added here turned out to not
@@ -768,9 +776,27 @@ async function fetchTopROEStocks() {
         // once here so the widget does zero number-formatting of its own,
         // same "format server-side, display client-side" contract as every
         // other numeric field in this file.
-        price: Number.isFinite(Number(r.price)) ? Number(r.price).toLocaleString('en-IN') : '',
+        // w78 — plain toFixed(2), NOT toLocaleString('en-IN'). The comma
+        // grouping toLocaleString adds looked correct in isolation but
+        // broke the widget's fixed-width monospace table alignment on a
+        // real device — some Android "monospace" font fallbacks don't
+        // render punctuation (commas) at the same fixed width as digits,
+        // even though the typeface otherwise claims to be monospace, so
+        // a comma-containing value silently threw off column alignment
+        // for that one row. Comma-formatting is still used correctly on
+        // the standalone Nifty/Bank Nifty lines (formatIndianRupeesDecimal
+        // in StudentWidgetRenderer.kt), which aren't inside a fixed-width
+        // table and don't have this constraint.
+        price: Number.isFinite(Number(r.price)) ? Number(r.price).toFixed(2) : '',
         roe: Number.isFinite(Number(r.roe)) ? Number(r.roe).toFixed(1) : '',
         peRatio: Number.isFinite(Number(r.pe_ratio)) ? Number(r.pe_ratio).toFixed(1) : '',
+        // w78 — carried through so runFetchCycle() can read
+        // roeStocks[0].computedAt for the top-level roeComputedDate
+        // field (see that field's own comment in the payload). Not
+        // rendered per-row by the widget — it's the same date across
+        // all 5 rows, shown once in the shared "Fundamentals as of"
+        // line instead.
+        computedAt: String(r.computed_at || ''),
       }))
       .filter(r => r.symbol); // drop any row missing even a symbol — never show a blank row
     if (rows.length && !result.length) {
@@ -888,11 +914,16 @@ async function runFetchCycle() {
   // them.
   let bankNifty = { bankNiftyClose: '', bankNiftyChangePct: '', bankNiftyDate: '' };
   let roeStocks = [];
+  // w78 — see roeComputedDate's own comment in the payload below for why
+  // this needs the same fresh-on-stock-run / preserved-otherwise
+  // treatment as roeStocks itself.
+  let roeComputedDate = '';
   if (isStockFetchRun) {
     [bankNifty, roeStocks] = await Promise.all([
       fetchBankNiftyData(),
       fetchTopROEStocks(),
     ]);
+    roeComputedDate = (roeStocks[0] && roeStocks[0].computedAt) || '';
   } else {
     try {
       const existingSnap = await admin.database().ref('widgetConfig/news').once('value');
@@ -903,6 +934,7 @@ async function runFetchCycle() {
         bankNiftyDate: existing.bankNiftyDate || '',
       };
       roeStocks = Array.isArray(existing.roeStocks) ? existing.roeStocks : [];
+      roeComputedDate = existing.roeComputedDate || '';
     } catch (e) {
       // Read failure here just means this cycle's stock fields go blank
       // for one run (same fail-safe-empty contract as every fetch*()
@@ -960,6 +992,17 @@ async function runFetchCycle() {
     // fetchTopROEStocks() return zero rows", not "why didn't the key
     // get written" (see that function's own >100% ROE guard comment and
     // the FAILED/ALL-filtered-out console lines for how to diagnose that).
+    // w78 — roeComputedDate: the actual date the ROE data was computed,
+    // sourced from the API's own row-level computed_at field (all 5
+    // rows share the same date, so the first row's value is
+    // representative). Deliberately separate from the top-level
+    // fetchedAt above: fetchedAt is Date.now() on EVERY run including
+    // the 45-min news-only cycle, so it always shows "today" even on a
+    // day roeStocks itself wasn't refreshed (see the preserve-existing
+    // logic above) — roeComputedDate only changes when roeStocks itself
+    // actually changes, giving the widget's "Fundamentals as of <date>"
+    // line an honest date instead of always claiming "today".
+    roeComputedDate,
     roeStocks,
     fetchedAt: Date.now(),
   };
