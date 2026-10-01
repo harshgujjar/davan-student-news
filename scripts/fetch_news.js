@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.4.0
+ * BUILD VERSION: v1.4.1
  * BUILD DATE:    2026-09-09, 12:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
@@ -15,7 +15,11 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
- * v1.4.0 (2026-09-09) — this build: MINOR, two changes.
+ * v1.4.1 (2026-10-01) — PATCH: gold/silver no longer go blank when
+ *                        goldprice.dev is slow (25 s timeout, 3 tries) and a
+ *                        failed run keeps the previous rates with
+ *                        goldSilverAsOf / goldSilverError.
+ * v1.4.0 (2026-09-09) — MINOR, two changes.
  *   1. roeStocks' price field switched from toLocaleString('en-IN') back
  *      to plain toFixed(2) (no comma grouping) — confirmed on a real
  *      device that comma punctuation breaks the widget's fixed-width
@@ -538,14 +542,37 @@ async function fetchQuoteText() {
 // Sequential with a short gap (not the api.gold-api.com 429 issue, but
 // keeping the pattern defensive since this is still a free-tier API run
 // from a shared GitHub Actions IP).
+// v1.4.1 (2026-10-01): goldprice.dev sometimes answers slower than the
+// 10 s FETCH_TIMEOUT_MS ("The user aborted a request", Actions run #249),
+// and the run then wrote EMPTY rates over the good ones. Each call now
+// gets a 25 s timeout and up to 3 tries; if it still fails, runFetchCycle
+// keeps the previous run's rates (see goldSilverAsOf there).
+async function fetchJsonPatient(url, tries = 3) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      console.log(`fetchJsonPatient: try ${i + 1}/${tries} failed for ${url}: ${e.message}`);
+      if (i < tries - 1) await sleep(3000 * (i + 1));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr;
+}
+
 async function fetchGoldSilverRates() {
   const empty = { gold24Rate: '', gold22Rate: '', silverRate: '', silverRateKg: '' };
   try {
-    const caratRes = await fetchWithRetryOn429(SOURCES.goldCaratApi);
-    const caratData = await caratRes.json();
+    const caratData = await fetchJsonPatient(SOURCES.goldCaratApi);
     await sleep(1000);
-    const silverRes = await fetchWithRetryOn429(SOURCES.silverConvertApi);
-    const silverData = await silverRes.json();
+    const silverData = await fetchJsonPatient(SOURCES.silverConvertApi);
 
     const gold24PerGram = caratData && parseFloat(caratData.price_gram_24k);
     const gold22PerGram = caratData && parseFloat(caratData.price_gram_22k);
@@ -1006,6 +1033,28 @@ async function runFetchCycle() {
     roeStocks,
     fetchedAt: Date.now(),
   };
+
+  // v1.4.1 — never blank good gold/silver rates because one fetch failed:
+  // keep the previous run's values and say since when (goldSilverAsOf, IST
+  // date of the last successful fetch). Widgets and the portal show
+  // "as of <date>" when it is not today.
+  if (!payload.gold24Rate || !payload.silverRate) {
+    try {
+      const prevSnap = await admin.database().ref('widgetConfig/news').once('value');
+      const prev = prevSnap.val() || {};
+      for (const k of ['gold24Rate', 'gold22Rate', 'silverRate', 'silverRateKg']) {
+        if (!payload[k] && prev[k]) payload[k] = prev[k];
+      }
+      payload.goldSilverAsOf = prev.goldSilverAsOf || '';
+      payload.goldSilverError = 'last fetch failed ' + new Date().toISOString();
+      console.warn('runFetchCycle: gold/silver fetch failed — kept previous rates from', payload.goldSilverAsOf || '(unknown date)');
+    } catch (e) {
+      console.warn('runFetchCycle: could not read previous gold/silver to keep them:', e.message);
+    }
+  } else {
+    payload.goldSilverAsOf = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    payload.goldSilverError = '';
+  }
 
   await admin.database().ref('widgetConfig/news').set(payload);
 
