@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.4.1
- * BUILD DATE:    2026-09-09, 12:00 IST
+ * BUILD VERSION: v1.5.0
+ * BUILD DATE:    2026-10-04, 16:30 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,14 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.5.0 (2026-10-04) — MINOR: gold/silver are now India's benchmark IBJA rates
+ *                        (ibjarates.com, 999/916/750 gold, 999 silver, without 3%
+ *                        GST and making) instead of the international spot price
+ *                        (goldprice.dev, kept as the fallback). New fields:
+ *                        gold18Rate, aedInrRate (Dubai dirham), ratesSource,
+ *                        goldSilverSession, ratesAsOfText, ratesNote, fxAsOfText.
+ *                        IBJA publishes nothing on Sat/Sun and Govt holidays, so
+ *                        the last published day is shown "as of" that day.
  * v1.4.1 (2026-10-01) — PATCH: gold/silver no longer go blank when
  *                        goldprice.dev is slow (25 s timeout, 3 tries) and a
  *                        failed run keeps the previous rates with
@@ -218,6 +226,13 @@ const NEWS_SOURCES = {
 
 const SOURCES = {
   rateApi: 'https://api.frankfurter.dev/v2/rate/USD/INR',
+  // v1.5.0 — Dubai dirham, same API (checked from Actions 2026-10-04: {"rate":26.186})
+  aedRateApi: 'https://api.frankfurter.dev/v2/rate/AED/INR',
+  // v1.5.0 — India Bullion & Jewellers Association benchmark rates (what Indian
+  // jewellers quote, before 3% GST and making). Plain HTML page, no key. Its
+  // "Previous 30 Days" block lists AM (opening) then PM (closing) rows:
+  // DD/MM/YYYY 999 995 916 750 585 Silver999(kg) Platinum999 (gold per 10 g).
+  ibjaPage: 'https://ibjarates.com/',
   // Davangere, Karnataka coordinates (matches Harsha's meter.html location context)
   weatherApi: 'https://api.open-meteo.com/v1/forecast?latitude=14.4644&longitude=75.9218&current=temperature_2m,weather_code&timezone=Asia%2FKolkata',
   quoteApi: 'https://zenquotes.io/api/today',
@@ -455,15 +470,71 @@ async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4
 // Frankfurter returns { amount, base, date, rate }. Rounds to 2 decimals
 // for widget display (e.g. "83.12") — full precision isn't meaningful on
 // a small home-screen widget face.
-async function fetchUsdInrRate() {
+async function fetchUsdInrRate(url = SOURCES.rateApi) {
   try {
-    const res = await fetchWithTimeout(SOURCES.rateApi);
+    const res = await fetchWithTimeout(url);
     const data = await res.json();
     if (typeof data.rate !== 'number') throw new Error('missing rate field');
     return data.rate.toFixed(2);
   } catch (e) {
-    console.error('fetchUsdInrRate FAILED:', e.message);
+    console.error('fetchUsdInrRate FAILED:', url, e.message);
     return '';
+  }
+}
+
+// v1.5.0 — India time helpers for the "as of" lines.
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function istNow() { return new Date(Date.now() + 5.5 * 3600 * 1000); }   // read with getUTC*()
+function istIso(d) { return d.toISOString().slice(0, 10); }
+function dayText(iso) {   // '2026-10-01' -> 'Thu 1 Oct'
+  const d = new Date(iso + 'T00:00:00Z');
+  return DAY_NAMES[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + MONTH_NAMES[d.getUTCMonth()];
+}
+// Currency markets are shut on Sat/Sun: the weekend shows Friday's rate.
+function fxDayIso() {
+  const d = istNow(); const wd = d.getUTCDay();
+  if (wd === 6) d.setUTCDate(d.getUTCDate() - 1); else if (wd === 0) d.setUTCDate(d.getUTCDate() - 2);
+  return istIso(d);
+}
+
+// v1.5.0 — IBJA benchmark rates. Returns the newest published row (PM when the
+// closing rate of that day is out, else AM), or null when the page can't be read
+// or the numbers look wrong (then the caller falls back to goldprice.dev).
+async function fetchIbjaRates() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    let html;
+    try {
+      const res = await fetch(SOURCES.ibjaPage, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (DavanNewsBot; +https://github.com/harshgujjar/davan-student-news)' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      html = await res.text();
+    } finally { clearTimeout(timer); }
+    const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ');
+    const rows = [];
+    const re = /(\d{2})\/(\d{2})\/(\d{4}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,8}) (\d{3,7})/g;
+    let m;
+    while ((m = re.exec(text))) rows.push({ iso: `${m[3]}-${m[2]}-${m[1]}`, g999: +m[4], g916: +m[6], g750: +m[7], silverKg: +m[9] });
+    if (!rows.length) throw new Error('no rate rows found on the page');
+    // The AM block comes first; the PM block starts where the dates run back to the top.
+    const am = [], pm = [];
+    for (const r of rows) { if (!pm.length && (!am.length || r.iso < am[am.length - 1].iso)) am.push(r); else pm.push(r); }
+    const newest = [...am, ...pm].reduce((a, r) => (r.iso > a ? r.iso : a), '');
+    const pmRow = pm.find((r) => r.iso === newest);
+    const row = pmRow || am.find((r) => r.iso === newest);
+    const session = pmRow ? 'PM' : 'AM';
+    const ok = row.g999 > 30000 && row.g999 < 1000000 && row.g916 / row.g999 > 0.88 && row.g916 / row.g999 < 0.95
+      && row.g750 / row.g999 > 0.70 && row.g750 / row.g999 < 0.80 && row.silverKg > 20000 && row.silverKg < 2000000;
+    if (!ok) throw new Error('numbers out of range: ' + JSON.stringify(row));
+    return {
+      gold24Rate: String(row.g999), gold22Rate: String(row.g916), gold18Rate: String(row.g750),
+      silverRate: (row.silverKg / 100).toFixed(0), silverRateKg: String(row.silverKg),
+      date: row.iso, session,
+    };
+  } catch (e) {
+    console.error('fetchIbjaRates FAILED:', e.message);
+    return null;
   }
 }
 
@@ -569,6 +640,9 @@ async function fetchJsonPatient(url, tries = 3) {
 
 async function fetchGoldSilverRates() {
   const empty = { gold24Rate: '', gold22Rate: '', silverRate: '', silverRateKg: '' };
+  // v1.5.0 — India's IBJA rate first; the international spot price only when IBJA fails.
+  const ibja = await fetchIbjaRates();
+  if (ibja) return { ...ibja, source: 'IBJA' };
   try {
     const caratData = await fetchJsonPatient(SOURCES.goldCaratApi);
     await sleep(1000);
@@ -587,6 +661,8 @@ async function fetchGoldSilverRates() {
       gold22Rate: (gold22PerGram * 10).toFixed(0),
       silverRate: silverPer10g.toFixed(0),
       silverRateKg: (silverPer10g * 100).toFixed(0),
+      gold18Rate: caratData.price_gram_18k ? (parseFloat(caratData.price_gram_18k) * 10).toFixed(0) : '',
+      source: 'spot',
     };
   } catch (e) {
     console.error('fetchGoldSilverRates FAILED:', e.message);
@@ -903,7 +979,7 @@ async function runFetchCycle() {
   // Promise.all. They only run on the once-daily post-market-close
   // trigger (isStockFetchRun below), never the 45-min news cycle — see
   // that flag's own comment for the full BharatStock-quota reasoning.
-  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty] = await Promise.all([
+  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty, aedInrRate] = await Promise.all([
     fetchSectionHeadlines('india', indiaSources, indiaMaxCount),
     fetchSectionHeadlines('world', worldSources, worldMaxCount),
     fetchSectionHeadlines('bollywood', bollywoodSources, bollywoodMaxCount),
@@ -917,6 +993,7 @@ async function runFetchCycle() {
     // adding them to Promise.all cannot make it reject.
     fetchHoroscopes(),
     fetchNiftyData(),
+    fetchUsdInrRate(SOURCES.aedRateApi),   // v1.5.0 — Dubai dirham
   ]);
 
   // 2026-09-08 — is this the once-daily stock-data run? Driven by the
@@ -985,6 +1062,12 @@ async function runFetchCycle() {
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
     silverRateKg: goldSilver.silverRateKg,
+    // v1.5.0 — 18K gold, Dubai dirham, and where / which day the rates are from
+    gold18Rate: goldSilver.gold18Rate || '',
+    aedInrRate,
+    ratesSource: goldSilver.source || '',
+    goldSilverSession: goldSilver.session || '',
+    fxAsOfText: dayText(fxDayIso()),
     // 2026-09-07 — Page 7. These field names must match
     // StudentNewsConfig.parseSnapshot() EXACTLY. That function is the
     // first point db3 data enters the widget, so a name mismatch here is
@@ -1042,18 +1125,41 @@ async function runFetchCycle() {
     try {
       const prevSnap = await admin.database().ref('widgetConfig/news').once('value');
       const prev = prevSnap.val() || {};
-      for (const k of ['gold24Rate', 'gold22Rate', 'silverRate', 'silverRateKg']) {
+      for (const k of ['gold24Rate', 'gold22Rate', 'gold18Rate', 'silverRate', 'silverRateKg']) {
         if (!payload[k] && prev[k]) payload[k] = prev[k];
       }
       payload.goldSilverAsOf = prev.goldSilverAsOf || '';
+      payload.ratesSource = prev.ratesSource || '';
+      payload.goldSilverSession = prev.goldSilverSession || '';
       payload.goldSilverError = 'last fetch failed ' + new Date().toISOString();
       console.warn('runFetchCycle: gold/silver fetch failed — kept previous rates from', payload.goldSilverAsOf || '(unknown date)');
     } catch (e) {
       console.warn('runFetchCycle: could not read previous gold/silver to keep them:', e.message);
     }
   } else {
-    payload.goldSilverAsOf = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    // v1.5.0 — IBJA rates carry their own day (the last day they were published)
+    payload.goldSilverAsOf = goldSilver.date || istIso(istNow());
     payload.goldSilverError = '';
+  }
+  // v1.5.0 — the currencies keep their last value when a fetch fails, like gold
+  if (!payload.usdInrRate || !payload.aedInrRate) {
+    try {
+      const prev = (await admin.database().ref('widgetConfig/news').once('value')).val() || {};
+      for (const k of ['usdInrRate', 'aedInrRate']) if (!payload[k] && prev[k]) payload[k] = prev[k];
+    } catch (e) { console.warn('runFetchCycle: could not read previous currency rates:', e.message); }
+  }
+  // v1.5.0 — "as of" lines the widgets and the student app show as they are
+  {
+    const today = istNow(); const todayIso = istIso(today); const wd = today.getUTCDay();
+    const day = payload.goldSilverAsOf;
+    if (payload.ratesSource === 'IBJA') {
+      payload.ratesAsOfText = 'IBJA rate of ' + dayText(day) + (payload.goldSilverSession === 'PM' ? ', closing (PM)' : ', opening (AM)');
+    } else if (payload.ratesSource === 'spot') {
+      payload.ratesAsOfText = 'International price of ' + dayText(day);
+    } else payload.ratesAsOfText = day ? 'Rates of ' + dayText(day) : '';
+    payload.ratesNote = day && day < todayIso
+      ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : 'No new rates today (holiday)') + ' - last published rates shown'
+      : '';
   }
 
   await admin.database().ref('widgetConfig/news').set(payload);
@@ -1076,6 +1182,11 @@ async function runFetchCycle() {
     gold22Rate: goldSilver.gold22Rate,
     silverRate: goldSilver.silverRate,
     silverRateKg: goldSilver.silverRateKg,
+    gold18Rate: payload.gold18Rate,
+    aedInrRate: payload.aedInrRate,
+    ratesSource: payload.ratesSource,
+    ratesAsOfText: payload.ratesAsOfText,
+    ratesNote: payload.ratesNote,
     // 2026-09-07 — horoscopeSigns is the count, not the text: 12 means a
     // healthy run, 0 means BOTH CosmyDay and the newastro fallback failed
     // for every sign (a real signal worth seeing in the Actions log), and
@@ -1119,7 +1230,7 @@ if (require.main === module) {
     });
 }
 
-module.exports = { runFetchCycle };
+module.exports = { runFetchCycle, fetchGoldSilverRates, fetchUsdInrRate, SOURCES };
 
 /*
  * ══════════════════ CHANGELOG — full detail ══════════════════
