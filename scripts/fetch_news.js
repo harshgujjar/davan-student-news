@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.6.0
+ * BUILD VERSION: v1.6.1
  * BUILD DATE:    2026-10-04, 20:30 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.6.1 (2026-10-04) — PATCH: no weekly change until an older day is in the history (it compared the day with itself).
  * v1.6.0 (2026-10-04) — MINOR: any currencies the admin picks (widgetConfig/fxList, default
  *                        USD, AED, THB) -> fx [{c, n, k, f, r}] + widgetConfig/fxCatalog; daily
  *                        rate history (widgetConfig/rateHistory/{IST date}); changes since the
@@ -1209,7 +1210,7 @@ async function runFetchCycle() {
     const prevMetal = days.slice().reverse().map((k) => hist[k]).find((h) => h && h.d && entry.d && h.d < entry.d);
     const prevDay = days.filter((k) => k < todayKey).map((k) => hist[k]).pop();
     const weekKey = days.filter((k) => k <= istIso(new Date(istNow().getTime() - 7 * 864e5))).pop();
-    const week = weekKey ? hist[weekKey] : (days.length ? hist[days[0]] : null);
+    const week = weekKey ? hist[weekKey] : (days.length && days[0] < todayKey ? hist[days[0]] : null);   // no older day yet = no weekly change
     const chg = (o) => {
       if (!o) return null;
       const r = { g24: rateDiff(entry.g24, o.g24), g22: rateDiff(entry.g22, o.g22), s: rateDiff(entry.s, o.s), skg: rateDiff(entry.skg, o.skg), fx: {} };
@@ -1218,7 +1219,7 @@ async function runFetchCycle() {
     };
     const m = chg(prevMetal), d = chg(prevDay);
     payload.ratesChg = { g24: m && m.g24, g22: m && m.g22, s: m && m.s, skg: m && m.skg, fx: (d && d.fx) || {}, nifty: d && rateDiff(entry.nifty, prevDay && prevDay.nifty) };
-    payload.ratesWeekChg = Object.assign(chg(week) || {}, { nifty: week ? rateDiff(entry.nifty, week.nifty) : null, from: weekKey || (days[0] || '') });
+    payload.ratesWeekChg = week ? Object.assign(chg(week) || {}, { nifty: rateDiff(entry.nifty, week.nifty), from: weekKey || days[0] }) : null;
     // 1%+ move of 24K gold against the previous IBJA day: the widgets notify once per IBJA day
     payload.goldBigMove = !!(m && m.g24 && Math.abs(m.g24.p) >= 1);
     // the picker's list (own node, so the widgets' hourly news download stays small)
