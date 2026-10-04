@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.5.0
- * BUILD DATE:    2026-10-04, 16:30 IST
+ * BUILD VERSION: v1.6.0
+ * BUILD DATE:    2026-10-04, 20:30 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,11 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.6.0 (2026-10-04) — MINOR: any currencies the admin picks (widgetConfig/fxList, default
+ *                        USD, AED, THB) -> fx [{c, n, k, f, r}] + widgetConfig/fxCatalog; daily
+ *                        rate history (widgetConfig/rateHistory/{IST date}); changes since the
+ *                        previous rate day and over 7 days (ratesChg, ratesWeekChg) and the 1%
+ *                        big-move flag (goldBigMove) for the widgets' notifications.
  * v1.5.0 (2026-10-04) — MINOR: gold/silver are now India's benchmark IBJA rates
  *                        (ibjarates.com, 999/916/750 gold, 999 silver, without 3%
  *                        GST and making) instead of the international spot price
@@ -480,6 +485,34 @@ async function fetchUsdInrRate(url = SOURCES.rateApi) {
     console.error('fetchUsdInrRate FAILED:', url, e.message);
     return '';
   }
+}
+
+// v1.6.0 — the currencies the admin can pick (staff app 💱 Rates page writes widgetConfig/fxList).
+// Code -> [name, country, flag]. Each picked code is one frankfurter call: /v2/rate/{CODE}/INR.
+const FX_CATALOG = {
+  USD: ['US Dollar', 'United States', '🇺🇸'], AED: ['Dirham', 'Dubai (UAE)', '🇦🇪'], THB: ['Baht', 'Thailand', '🇹🇭'],
+  SAR: ['Riyal', 'Saudi Arabia', '🇸🇦'], QAR: ['Riyal', 'Qatar', '🇶🇦'], KWD: ['Dinar', 'Kuwait', '🇰🇼'], OMR: ['Rial', 'Oman', '🇴🇲'],
+  BHD: ['Dinar', 'Bahrain', '🇧🇭'], EUR: ['Euro', 'Europe', '🇪🇺'], GBP: ['Pound', 'United Kingdom', '🇬🇧'], CAD: ['Dollar', 'Canada', '🇨🇦'],
+  AUD: ['Dollar', 'Australia', '🇦🇺'], NZD: ['Dollar', 'New Zealand', '🇳🇿'], SGD: ['Dollar', 'Singapore', '🇸🇬'], MYR: ['Ringgit', 'Malaysia', '🇲🇾'],
+  JPY: ['Yen', 'Japan', '🇯🇵'], CNY: ['Yuan', 'China', '🇨🇳'], HKD: ['Dollar', 'Hong Kong', '🇭🇰'], KRW: ['Won', 'South Korea', '🇰🇷'],
+  CHF: ['Franc', 'Switzerland', '🇨🇭'], SEK: ['Krona', 'Sweden', '🇸🇪'], NOK: ['Krone', 'Norway', '🇳🇴'], DKK: ['Krone', 'Denmark', '🇩🇰'],
+  RUB: ['Rouble', 'Russia', '🇷🇺'], ZAR: ['Rand', 'South Africa', '🇿🇦'], NPR: ['Rupee', 'Nepal', '🇳🇵'], LKR: ['Rupee', 'Sri Lanka', '🇱🇰'],
+  BDT: ['Taka', 'Bangladesh', '🇧🇩'], PKR: ['Rupee', 'Pakistan', '🇵🇰'], IDR: ['Rupiah', 'Indonesia', '🇮🇩'], PHP: ['Peso', 'Philippines', '🇵🇭'],
+  VND: ['Dong', 'Vietnam', '🇻🇳'], TRY: ['Lira', 'Turkey', '🇹🇷'], BRL: ['Real', 'Brazil', '🇧🇷'], MXN: ['Peso', 'Mexico', '🇲🇽'],
+};
+const FX_DEFAULT = ['USD', 'AED', 'THB'];
+async function fetchFxList(codes) {
+  const out = await Promise.all(codes.map(async (c) => {
+    const r = c === 'USD' ? null : await fetchUsdInrRate(`https://api.frankfurter.dev/v2/rate/${c}/INR`);
+    return { c, r };
+  }));
+  return out;
+}
+// Change since the previous rate day (metals: the IBJA day before; currencies / Nifty: the run day before) and over 7 days.
+function rateDiff(cur, old) {
+  const a = parseFloat(cur), b = parseFloat(old);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !b) return null;
+  return { d: Math.round((a - b) * 100) / 100, p: Math.round(((a - b) * 10000) / b) / 100 };
 }
 
 // v1.5.0 — India time helpers for the "as of" lines.
@@ -995,6 +1028,14 @@ async function runFetchCycle() {
     fetchNiftyData(),
     fetchUsdInrRate(SOURCES.aedRateApi),   // v1.5.0 — Dubai dirham
   ]);
+  // v1.6.0 — the picked currencies (USD and AED come from the calls above)
+  let fxCodes = FX_DEFAULT;
+  try {
+    const v = (await admin.database().ref('widgetConfig/fxList').once('value')).val();
+    const list = (Array.isArray(v) ? v : (v && typeof v === 'object' ? Object.values(v) : [])).map((x) => String(x).toUpperCase()).filter((x) => FX_CATALOG[x]);
+    if (list.length) fxCodes = [...new Set(list)].slice(0, 12);
+  } catch (e) { console.warn('runFetchCycle: fxList read failed, using the default:', e.message); }
+  const fxRaw = await fetchFxList(fxCodes.filter((c) => c !== 'AED'));
 
   // 2026-09-08 — is this the once-daily stock-data run? Driven by the
   // second cron trigger in the workflow YAML (see setup notes at the
@@ -1068,6 +1109,10 @@ async function runFetchCycle() {
     ratesSource: goldSilver.source || '',
     goldSilverSession: goldSilver.session || '',
     fxAsOfText: dayText(fxDayIso()),
+    fx: fxCodes.map((c) => {
+      const r = c === 'USD' ? usdInrRate : c === 'AED' ? aedInrRate : ((fxRaw.find((x) => x.c === c) || {}).r || '');
+      return { c, n: FX_CATALOG[c][0], k: FX_CATALOG[c][1], f: FX_CATALOG[c][2], r };
+    }),
     // 2026-09-07 — Page 7. These field names must match
     // StudentNewsConfig.parseSnapshot() EXACTLY. That function is the
     // first point db3 data enters the widget, so a name mismatch here is
@@ -1142,12 +1187,43 @@ async function runFetchCycle() {
     payload.goldSilverError = '';
   }
   // v1.5.0 — the currencies keep their last value when a fetch fails, like gold
-  if (!payload.usdInrRate || !payload.aedInrRate) {
+  if (!payload.usdInrRate || !payload.aedInrRate || payload.fx.some((x) => !x.r)) {
     try {
       const prev = (await admin.database().ref('widgetConfig/news').once('value')).val() || {};
       for (const k of ['usdInrRate', 'aedInrRate']) if (!payload[k] && prev[k]) payload[k] = prev[k];
+      const pfx = Array.isArray(prev.fx) ? prev.fx : [];
+      payload.fx.forEach((x) => { if (!x.r) { const o = pfx.find((y) => y && y.c === x.c); if (o && o.r) x.r = o.r; } });
     } catch (e) { console.warn('runFetchCycle: could not read previous currency rates:', e.message); }
   }
+  payload.fx.forEach((x) => { if (x.c === 'USD' && !x.r) x.r = payload.usdInrRate; if (x.c === 'AED' && !x.r) x.r = payload.aedInrRate; });
+  // v1.6.0 — rate history (one small entry per IST day, overwritten through the day) and the changes the widgets show / notify
+  try {
+    const todayKey = istIso(istNow());
+    const fxMap = {}; payload.fx.forEach((x) => { if (x.r) fxMap[x.c] = x.r; });
+    const entry = { d: payload.goldSilverAsOf || '', g24: payload.gold24Rate || '', g22: payload.gold22Rate || '', g18: payload.gold18Rate || '',
+      s: payload.silverRate || '', skg: payload.silverRateKg || '', fx: fxMap, nifty: payload.niftyClose || '', niftyD: payload.niftyDate || '' };
+    await admin.database().ref('widgetConfig/rateHistory/' + todayKey).set(entry);
+    const hist = (await admin.database().ref('widgetConfig/rateHistory').orderByKey().limitToLast(16).once('value')).val() || {};
+    const days = Object.keys(hist).sort();
+    // metals: the newest entry of an EARLIER IBJA day; currencies / Nifty: the entry of the previous run day
+    const prevMetal = days.slice().reverse().map((k) => hist[k]).find((h) => h && h.d && entry.d && h.d < entry.d);
+    const prevDay = days.filter((k) => k < todayKey).map((k) => hist[k]).pop();
+    const weekKey = days.filter((k) => k <= istIso(new Date(istNow().getTime() - 7 * 864e5))).pop();
+    const week = weekKey ? hist[weekKey] : (days.length ? hist[days[0]] : null);
+    const chg = (o) => {
+      if (!o) return null;
+      const r = { g24: rateDiff(entry.g24, o.g24), g22: rateDiff(entry.g22, o.g22), s: rateDiff(entry.s, o.s), skg: rateDiff(entry.skg, o.skg), fx: {} };
+      Object.keys(fxMap).forEach((c) => { const x = rateDiff(fxMap[c], o.fx && o.fx[c]); if (x) r.fx[c] = x; });
+      return r;
+    };
+    const m = chg(prevMetal), d = chg(prevDay);
+    payload.ratesChg = { g24: m && m.g24, g22: m && m.g22, s: m && m.s, skg: m && m.skg, fx: (d && d.fx) || {}, nifty: d && rateDiff(entry.nifty, prevDay && prevDay.nifty) };
+    payload.ratesWeekChg = Object.assign(chg(week) || {}, { nifty: week ? rateDiff(entry.nifty, week.nifty) : null, from: weekKey || (days[0] || '') });
+    // 1%+ move of 24K gold against the previous IBJA day: the widgets notify once per IBJA day
+    payload.goldBigMove = !!(m && m.g24 && Math.abs(m.g24.p) >= 1);
+    // the picker's list (own node, so the widgets' hourly news download stays small)
+    await admin.database().ref('widgetConfig/fxCatalog').set(Object.keys(FX_CATALOG).map((c) => ({ c, n: FX_CATALOG[c][0], k: FX_CATALOG[c][1], f: FX_CATALOG[c][2] })));
+  } catch (e) { console.warn('runFetchCycle: rate history / changes failed:', e.message); }
   // v1.5.0 — "as of" lines the widgets and the student app show as they are
   {
     const today = istNow(); const todayIso = istIso(today); const wd = today.getUTCDay();
