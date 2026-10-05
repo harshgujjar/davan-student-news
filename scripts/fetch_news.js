@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.6.1
+ * BUILD VERSION: v1.6.2
  * BUILD DATE:    2026-10-04, 20:30 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
@@ -15,6 +15,8 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.6.2 (2026-10-05) — PATCH: fxList / fxCatalog live under widgetConfig/newsSourceConfig (the staff app got 401 on new
+ *                        widgetConfig children - the database rules allow only the existing ones).
  * v1.6.1 (2026-10-04) — PATCH: no weekly change until an older day is in the history (it compared the day with itself).
  * v1.6.0 (2026-10-04) — MINOR: any currencies the admin picks (widgetConfig/fxList, default
  *                        USD, AED, THB) -> fx [{c, n, k, f, r}] + widgetConfig/fxCatalog; daily
@@ -1032,7 +1034,9 @@ async function runFetchCycle() {
   // v1.6.0 — the picked currencies (USD and AED come from the calls above)
   let fxCodes = FX_DEFAULT;
   try {
-    const v = (await admin.database().ref('widgetConfig/fxList').once('value')).val();
+    // v1.6.2: under newsSourceConfig (the apps may read / write only the existing widgetConfig children); old place as fallback
+    let v = (await admin.database().ref('widgetConfig/newsSourceConfig/fxList').once('value')).val();
+    if (!v) v = (await admin.database().ref('widgetConfig/fxList').once('value')).val();
     const list = (Array.isArray(v) ? v : (v && typeof v === 'object' ? Object.values(v) : [])).map((x) => String(x).toUpperCase()).filter((x) => FX_CATALOG[x]);
     if (list.length) fxCodes = [...new Set(list)].slice(0, 12);
   } catch (e) { console.warn('runFetchCycle: fxList read failed, using the default:', e.message); }
@@ -1223,7 +1227,7 @@ async function runFetchCycle() {
     // 1%+ move of 24K gold against the previous IBJA day: the widgets notify once per IBJA day
     payload.goldBigMove = !!(m && m.g24 && Math.abs(m.g24.p) >= 1);
     // the picker's list (own node, so the widgets' hourly news download stays small)
-    await admin.database().ref('widgetConfig/fxCatalog').set(Object.keys(FX_CATALOG).map((c) => ({ c, n: FX_CATALOG[c][0], k: FX_CATALOG[c][1], f: FX_CATALOG[c][2] })));
+    await admin.database().ref('widgetConfig/newsSourceConfig/fxCatalog').set(Object.keys(FX_CATALOG).map((c) => ({ c, n: FX_CATALOG[c][0], k: FX_CATALOG[c][1], f: FX_CATALOG[c][2] })));
   } catch (e) { console.warn('runFetchCycle: rate history / changes failed:', e.message); }
   // v1.5.0 — "as of" lines the widgets and the student app show as they are
   {
