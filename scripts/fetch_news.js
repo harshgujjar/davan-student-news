@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.6.2
- * BUILD DATE:    2026-10-04, 20:30 IST
+ * BUILD VERSION: v1.7.0
+ * BUILD DATE:    2026-10-11, 10:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,11 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.7.0 (2026-10-11) — MINOR (user: "I have 4 India feeds but don't know which news comes from NDTV or Times"):
+ *                        each section now takes turns between its ticked sources (TOI, NDTV, TOI, ...) instead of
+ *                        filling "Max shown" from the first source, and writes indiaSrc / worldSrc / bollywoodSrc /
+ *                        sandalwoodSrc = the source key of each headline (same order as *Headlines, which stay plain
+ *                        strings so older widgets keep working). Student widget build 213+ / staff 263+ / portal v11.59 show them.
  * v1.6.2 (2026-10-05) — PATCH: fxList / fxCatalog live under widgetConfig/newsSourceConfig (the staff app got 401 on new
  *                        widgetConfig children - the database rules allow only the existing ones).
  * v1.6.1 (2026-10-04) — PATCH: no weekly change until an older day is in the history (it compared the day with itself).
@@ -444,35 +449,36 @@ async function fetchRssHeadlines(url, max) {
 // headline strip; not presented as a strict global timeline.
 async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4) {
   const sectionSources = NEWS_SOURCES[sectionKey] || {};
-  const urls = enabledSourceKeys
-    .map((key) => sectionSources[key])
-    .filter(Boolean);
+  const keys = enabledSourceKeys.filter((key) => sectionSources[key]);
 
-  if (urls.length === 0) return [];
+  if (keys.length === 0) return { list: [], src: [] };
 
   const perSourceMax = maxCount; // fetch up to maxCount from EACH source, then trim the merged/deduped result down to maxCount overall
   const results = await Promise.all(
-    urls.map((url) =>
-      fetchRssHeadlines(url, perSourceMax).catch((e) => {
-        console.error(`fetchSectionHeadlines(${sectionKey}) source FAILED: ${url} —`, e.message);
+    keys.map((key) =>
+      fetchRssHeadlines(sectionSources[key], perSourceMax).catch((e) => {
+        console.error(`fetchSectionHeadlines(${sectionKey}) source FAILED: ${key} —`, e.message);
         return [];
       })
     )
   );
 
+  // v1.7.0: take turns between the sources (1st of each, then 2nd of each, ...) so every ticked source shows up,
+  // and remember which source each headline came from (src[i] belongs to list[i]).
   const seen = new Set();
-  const merged = [];
-  for (const list of results) {
-    for (const headline of list) {
+  const list = [], src = [];
+  for (let i = 0; i < perSourceMax && list.length < maxCount; i++) {
+    for (let k = 0; k < results.length && list.length < maxCount; k++) {
+      const headline = results[k][i];
+      if (!headline) continue;
       const key = headline.trim().toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push(headline);
-      if (merged.length >= maxCount) break;
+      list.push(headline);
+      src.push(keys[k]);
     }
-    if (merged.length >= maxCount) break;
   }
-  return merged;
+  return { list, src };
 }
 
 // Frankfurter returns { amount, base, date, rate }. Rounds to 2 decimals
@@ -1015,7 +1021,7 @@ async function runFetchCycle() {
   // Promise.all. They only run on the once-daily post-market-close
   // trigger (isStockFetchRun below), never the 45-min news cycle — see
   // that flag's own comment for the full BharatStock-quota reasoning.
-  const [indiaHeadlines, worldHeadlines, bollywoodHeadlines, sandalwoodHeadlines, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty, aedInrRate] = await Promise.all([
+  const [indiaSec, worldSec, bollywoodSec, sandalwoodSec, usdInrRate, weatherLine, quoteText, goldSilver, horoscopeBySign, nifty, aedInrRate] = await Promise.all([
     fetchSectionHeadlines('india', indiaSources, indiaMaxCount),
     fetchSectionHeadlines('world', worldSources, worldMaxCount),
     fetchSectionHeadlines('bollywood', bollywoodSources, bollywoodMaxCount),
@@ -1031,6 +1037,8 @@ async function runFetchCycle() {
     fetchNiftyData(),
     fetchUsdInrRate(SOURCES.aedRateApi),   // v1.5.0 — Dubai dirham
   ]);
+  // v1.7.0: each section = { list: headlines, src: the source key of each one }
+  const indiaHeadlines = indiaSec.list, worldHeadlines = worldSec.list, bollywoodHeadlines = bollywoodSec.list, sandalwoodHeadlines = sandalwoodSec.list;
   // v1.6.0 — the picked currencies (USD and AED come from the calls above)
   let fxCodes = FX_DEFAULT;
   try {
@@ -1101,6 +1109,11 @@ async function runFetchCycle() {
     worldHeadlines,
     bollywoodHeadlines,
     sandalwoodHeadlines,
+    // v1.7.0: source key per headline (same order), e.g. ['toi', 'ndtv', 'toi']
+    indiaSrc: indiaSec.src,
+    worldSrc: worldSec.src,
+    bollywoodSrc: bollywoodSec.src,
+    sandalwoodSrc: sandalwoodSec.src,
     usdInrRate,
     weatherLine,
     quoteText,
