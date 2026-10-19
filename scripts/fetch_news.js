@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.7.0
- * BUILD DATE:    2026-10-11, 10:00 IST
+ * BUILD VERSION: v1.8.0
+ * BUILD DATE:    2026-10-19, 18:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,9 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.8.0 (2026-10-19) — MINOR (user: "can we show the picture of the news in the widget"): also saves the picture URL of each
+ *                        headline (RSS media:content / media:thumbnail / enclosure / first <img>) as indiaImg / worldImg / bollywoodImg /
+ *                        sandalwoodImg (same order as *Headlines, '' = none). A few bytes per headline; no new reads. Pairs with student widget w2xx.
  * v1.7.0 (2026-10-11) — MINOR (user: "I have 4 India feeds but don't know which news comes from NDTV or Times"):
  *                        each section now takes turns between its ticked sources (TOI, NDTV, TOI, ...) instead of
  *                        filling "Max shown" from the first source, and writes indiaSrc / worldSrc / bollywoodSrc /
@@ -406,6 +409,18 @@ async function fetchWithRetryOn429(url, opts = {}, maxRetries = 2, delayMs = 500
 // single malformed <item> is skipped rather than failing the whole feed —
 // publishers occasionally emit a malformed entry without the whole feed
 // being broken.
+// v1.8.0: picture of each headline (RSS enclosure / media:content / media:thumbnail / first <img> of the description), by headline text.
+const NEWS_IMG = new Map();
+function rssItemImage(item) {
+  const pick = (x) => { if (Array.isArray(x)) x = x[0]; return x && x.$ && x.$.url ? String(x.$.url) : ''; };
+  let u = pick(item['media:content']) || pick(item['media:thumbnail']);
+  if (!u && item.enclosure && /image|jpe?g|png|webp/i.test(((Array.isArray(item.enclosure) ? item.enclosure[0] : item.enclosure).$ || {}).type || '')) u = pick(item.enclosure);
+  if (!u) {
+    const d = typeof item.description === 'string' ? item.description : (item['content:encoded'] && typeof item['content:encoded'] === 'string' ? item['content:encoded'] : '');
+    const m = d.match(/<img[^>]+src=["']([^"']+)["']/i); if (m) u = m[1];
+  }
+  return /^https:\/\//i.test(u) ? u : '';
+}
 async function fetchRssHeadlines(url, max) {
   const res = await fetchWithTimeout(url, {
     headers: { 'User-Agent': 'DavanStudentWidget-NewsFetcher/1.0' },
@@ -421,7 +436,7 @@ async function fetchRssHeadlines(url, max) {
   for (const item of itemList) {
     try {
       const title = typeof item.title === 'string' ? item.title : (item.title && item.title._);
-      if (title && title.trim()) headlines.push(title.trim());
+      if (title && title.trim()) { headlines.push(title.trim()); const im = rssItemImage(item); if (im) NEWS_IMG.set(title.trim(), im); }
     } catch (e) {
       // skip malformed single item, keep going
     }
@@ -451,7 +466,7 @@ async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4
   const sectionSources = NEWS_SOURCES[sectionKey] || {};
   const keys = enabledSourceKeys.filter((key) => sectionSources[key]);
 
-  if (keys.length === 0) return { list: [], src: [] };
+  if (keys.length === 0) return { list: [], src: [], img: [] };
 
   const perSourceMax = maxCount; // fetch up to maxCount from EACH source, then trim the merged/deduped result down to maxCount overall
   const results = await Promise.all(
@@ -466,7 +481,7 @@ async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4
   // v1.7.0: take turns between the sources (1st of each, then 2nd of each, ...) so every ticked source shows up,
   // and remember which source each headline came from (src[i] belongs to list[i]).
   const seen = new Set();
-  const list = [], src = [];
+  const list = [], src = [], img = [];
   for (let i = 0; i < perSourceMax && list.length < maxCount; i++) {
     for (let k = 0; k < results.length && list.length < maxCount; k++) {
       const headline = results[k][i];
@@ -476,9 +491,10 @@ async function fetchSectionHeadlines(sectionKey, enabledSourceKeys, maxCount = 4
       seen.add(key);
       list.push(headline);
       src.push(keys[k]);
+      img.push(NEWS_IMG.get(headline) || '');   // v1.8.0
     }
   }
-  return { list, src };
+  return { list, src, img };
 }
 
 // Frankfurter returns { amount, base, date, rate }. Rounds to 2 decimals
@@ -1114,6 +1130,8 @@ async function runFetchCycle() {
     worldSrc: worldSec.src,
     bollywoodSrc: bollywoodSec.src,
     sandalwoodSrc: sandalwoodSec.src,
+    // v1.8.0: picture URL per headline (same order, '' = none) for the student widget's thumbnails
+    indiaImg: indiaSec.img, worldImg: worldSec.img, bollywoodImg: bollywoodSec.img, sandalwoodImg: sandalwoodSec.img,
     usdInrRate,
     weatherLine,
     quoteText,
