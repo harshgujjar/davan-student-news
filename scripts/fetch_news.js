@@ -1319,6 +1319,7 @@ async function runFetchCycle() {
       const iref = admin.database().ref('widgetConfig/newsSourceConfig/ratesInsight');
       const ikey = [payload.goldSilverAsOf, payload.goldSilverSession, payload.silverRateKg, payload.gold24Rate, payload.gold22Rate].join('|');
       const prevKey = (await iref.child('k').once('value')).val();
+      if (ikey === prevKey) { const ps = (await iref.child('sig').once('value')).val(); if (ps) payload.ratesSignal = ps; }   // unchanged: keep the widgets' one-line signal
       if (ikey !== prevKey && payload.silverRateKg) {
         const cfgRaw = (await admin.database().ref('widgetConfig/newsSourceConfig/ratesCfg').once('value')).val() || {};
         const cfg = Object.assign({}, INSIGHT_DEFAULT_CFG, cfgRaw);
@@ -1335,6 +1336,9 @@ async function runFetchCycle() {
         };
         const out = { k: ikey, at: new Date().toISOString(), asOf: payload.goldSilverAsOf, session: payload.goldSilverSession || '', src: payload.ratesSource || '', cfg,
           silver: analyseRates(mk('skg', PUBLIC_SILVER_SEED), cfg, 'Silver', 'kg'), gold24: analyseRates(mk('g24'), cfg, 'Gold 24K', '10g'), gold22: analyseRates(mk('g22'), cfg, 'Gold 22K', '10g') };
+        const sg = (A, nm) => A ? { i: A.icon, t: nm + ': ' + ({ buy: A.falling ? 'buy slowly' : 'good time to buy', wait: 'wait', sell: 'high, think about selling' })[A.zone], z: A.zone } : null;
+        out.sig = { silver: sg(out.silver, 'Silver'), gold: sg(out.gold24, 'Gold') };
+        payload.ratesSignal = out.sig;
         await iref.set(out);
         const cut = istIso(new Date(istNow().getTime() - cfg.keepDays * 864e5));
         const old = (await admin.database().ref('widgetConfig/rateHistory').orderByKey().endAt(cut).limitToFirst(60).once('value')).val() || {};
