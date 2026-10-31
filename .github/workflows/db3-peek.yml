@@ -1,0 +1,22 @@
+# READ ONLY: look at DB3 nodes (scripts/db3_peek.js). Manual.
+name: DB3 peek
+on:
+  workflow_dispatch:
+    inputs:
+      paths: { description: "Paths, comma separated (add ?shallow for keys only)", default: "widgetConfig/newsSourceConfig/ratesInsight" }
+      maxc: { description: "Max characters printed", default: "20000" }
+jobs:
+  peek:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - working-directory: scripts
+        run: npm install --omit=dev
+      - working-directory: scripts
+        env:
+          FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+          PATHS: ${{ inputs.paths }}
+          MAXC: ${{ inputs.maxc }}
+        run: node db3_peek.js

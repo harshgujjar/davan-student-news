@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.8.0
- * BUILD DATE:    2026-10-19, 18:00 IST
+ * BUILD VERSION: v1.9.0
+ * BUILD DATE:    2026-10-31, 12:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -26,6 +26,8 @@
  * v1.6.2 (2026-10-05) — PATCH: fxList / fxCatalog live under widgetConfig/newsSourceConfig (the staff app got 401 on new
  *                        widgetConfig children - the database rules allow only the existing ones).
  * v1.6.1 (2026-10-04) — PATCH: no weekly change until an older day is in the history (it compared the day with itself).
+ * v1.9.0 (2026-10-31) — MINOR: one-year gold/silver analysis (widgetConfig/newsSourceConfig/ratesInsight, public read): chart series, amount + % changes, buy/wait/sell zone,
+ *                        step plan; limits in newsSourceConfig/ratesCfg; written only when the rates change; rateHistory older than 400 days is removed.
  * v1.6.0 (2026-10-04) — MINOR: any currencies the admin picks (widgetConfig/fxList, default
  *                        USD, AED, THB) -> fx [{c, n, k, f, r}] + widgetConfig/fxCatalog; daily
  *                        rate history (widgetConfig/rateHistory/{IST date}); changes since the
@@ -538,6 +540,61 @@ function rateDiff(cur, old) {
   const a = parseFloat(cur), b = parseFloat(old);
   if (!Number.isFinite(a) || !Number.isFinite(b) || !b) return null;
   return { d: Math.round((a - b) * 100) / 100, p: Math.round(((a - b) * 10000) / b) / 100 };
+}
+
+// v1.9.0 — one-year rate analysis for the apps' Rates page (newsSourceConfig/ratesInsight, public read, written only when the rates change).
+// Numbers and short English lines only: the apps and widgets draw the chart and cards from it. Written by code, so no AI mark.
+const INSIGHT_DEFAULT_CFG = { buyPct: 30, sellPct: 70, dipWeekPct: 4, hotAvgPct: 15, keepDays: 400, planAmount: 50000, planSteps: [30, 20, 20, 30], dipSteps: [5, 10] };
+// Public silver prices (Rs per kg, approximate, mixed sources) used ONLY before our own daily log reaches back that far.
+const PUBLIC_SILVER_SEED = [['2026-03-01', 311000], ['2026-04-30', 266000], ['2026-07-31', 235000], ['2026-08-19', 245220], ['2026-08-27', 240860], ['2026-10-01', 225210]];
+function inrFmt(n) { return Math.round(n).toLocaleString('en-IN'); }
+function dayDiff(a, b) { return Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 864e5); }
+function insightChange(pts, asOf, n) {
+  const cur = pts[pts.length - 1];
+  if (n === 1) { const o = pts.length > 1 ? pts[pts.length - 2] : null; return o ? Object.assign(rateDiff(cur.v, o.v) || {}, { from: o.d, pub: !!o.p }) : null; }
+  let o = null;
+  for (let i = pts.length - 1; i >= 0; i--) { if (dayDiff(asOf, pts[i].d) >= n) { o = pts[i]; break; } }
+  return o ? Object.assign(rateDiff(cur.v, o.v) || {}, { from: o.d, pub: !!o.p }) : null;
+}
+// pts: [{d:'YYYY-MM-DD', v:number, p?:1}] oldest first. unit: 'kg' | '10g'.
+function analyseRates(pts, cfg, name, unit) {
+  if (!pts || pts.length < 2) return null;
+  const cur = pts[pts.length - 1], asOf = cur.d;
+  const year = pts.filter((x) => dayDiff(asOf, x.d) <= 366);
+  let lo = year[0], hi = year[0];
+  year.forEach((x) => { if (x.v < lo.v) lo = x; if (x.v > hi.v) hi = x; });
+  const range = hi.v - lo.v || 1;
+  const pos = Math.round(((cur.v - lo.v) * 1000) / range) / 10;
+  const buyBelow = Math.round(lo.v + (cfg.buyPct / 100) * range), sellFrom = Math.round(lo.v + (cfg.sellPct / 100) * range);
+  const avgOf = (n) => { const a = pts.filter((x) => dayDiff(asOf, x.d) <= n && !x.p); return a.length >= 3 ? a.reduce((t, x) => t + x.v, 0) / a.length : null; };
+  const avg30 = avgOf(30), avg90 = avgOf(90);
+  const ch = { day: insightChange(pts, asOf, 1), week: insightChange(pts, asOf, 7), month: insightChange(pts, asOf, 30), m3: insightChange(pts, asOf, 90), y1: insightChange(pts, asOf, 365) };
+  const vsHi = rateDiff(cur.v, hi.v), vsLo = rateDiff(cur.v, lo.v);
+  const falling = !!(ch.week && ch.week.p <= -cfg.dipWeekPct);
+  const hot = !!(avg90 && cur.v >= avg90 * (1 + cfg.hotAvgPct / 100));
+  let zone = pos <= cfg.buyPct ? 'buy' : pos >= cfg.sellPct ? 'sell' : 'wait';
+  let verdict, tone, icon;
+  if (zone === 'buy') { verdict = falling ? 'BUY SLOWLY, IN PARTS' : 'GOOD TIME TO BUY'; tone = falling ? 'warn' : 'ok'; icon = falling ? '🟡' : '🟢'; }
+  else if (zone === 'sell') { verdict = hot ? 'GOOD TIME TO SELL A PART' : 'HIGH - THINK ABOUT SELLING A PART'; tone = 'danger'; icon = '🔴'; }
+  else { verdict = 'WAIT - BUY ONLY WHAT YOU NEED'; tone = 'warn'; icon = '🟡'; }
+  const plan = [];
+  if (zone === 'buy') {
+    const A = cfg.planAmount, st = cfg.planSteps;
+    const part = (pc) => Math.round((A * pc) / 100);
+    const gramsAt = (amt, price) => (unit === 'kg' ? (amt / price) * 1000 : (amt / price) * 10);
+    plan.push({ k: 'NOW', t: 'Buy Rs ' + inrFmt(part(st[0])) + ' (about ' + gramsAt(part(st[0]), cur.v).toFixed(1) + ' g at today\'s rate)', at: Math.round(cur.v) });
+    cfg.dipSteps.forEach((dp, i) => { const at = Math.round(cur.v * (1 - dp / 100)); plan.push({ k: 'IF -' + dp + '%', t: 'Add Rs ' + inrFmt(part(st[i + 1])) + ' when it falls Rs ' + inrFmt(cur.v - at) + ' more', at }); });
+    plan.push({ k: 'STEADY', t: 'Add the last Rs ' + inrFmt(part(st[3])) + ' after 4 sessions with no new low', at: 0 });
+  }
+  const lines = [];
+  if (vsHi && cur.d !== hi.d) lines.push(name + ' is Rs ' + inrFmt(Math.abs(vsHi.d)) + ' (' + Math.abs(vsHi.p) + '%) ' + (vsHi.d < 0 ? 'below' : 'above') + ' its highest point (Rs ' + inrFmt(hi.v) + ' on ' + hi.d + ').');
+  if (ch.week) lines.push('This week it ' + (ch.week.d < 0 ? 'fell Rs ' : 'rose Rs ') + inrFmt(Math.abs(ch.week.d)) + ' (' + Math.abs(ch.week.p) + '%)' + (falling ? ', so it may still go lower.' : '.'));
+  if (zone === 'sell') lines.push('It is in the top part of its range. If you hold ' + name.toLowerCase() + ' and need money, selling a part now books a good price.');
+  else lines.push('A sell signal starts at about Rs ' + inrFmt(sellFrom) + ' per ' + unit + ', which is Rs ' + inrFmt(Math.max(0, sellFrom - cur.v)) + ' (' + (Math.round(Math.max(0, sellFrom - cur.v) * 1000 / cur.v) / 10) + '%) above today.');
+  // series for the chart: oldest first, [date, value, 1 if public]
+  const series = year.map((x) => (x.p ? [x.d, Math.round(x.v), 1] : [x.d, Math.round(x.v)]));
+  return { unit, cur: Math.round(cur.v), asOf, n: pts.length, ownDays: pts.filter((x) => !x.p).length, hi: { d: hi.d, v: Math.round(hi.v) }, lo: { d: lo.d, v: Math.round(lo.v) },
+    pos, zone, verdict, tone, icon, buyBelow, sellFrom, avg30: avg30 && Math.round(avg30), avg90: avg90 && Math.round(avg90), ch, vsHi, vsLo, falling, hot, plan, lines, series };
 }
 
 // v1.5.0 — India time helpers for the "as of" lines.
@@ -1257,6 +1314,34 @@ async function runFetchCycle() {
     payload.ratesWeekChg = week ? Object.assign(chg(week) || {}, { nifty: rateDiff(entry.nifty, week.nifty), from: weekKey || days[0] }) : null;
     // 1%+ move of 24K gold against the previous IBJA day: the widgets notify once per IBJA day
     payload.goldBigMove = !!(m && m.g24 && Math.abs(m.g24.p) >= 1);
+    // v1.9.0 — one-year analysis for the Rates page; only when the rates changed since the last write; old history cleans itself up
+    try {
+      const iref = admin.database().ref('widgetConfig/newsSourceConfig/ratesInsight');
+      const ikey = [payload.goldSilverAsOf, payload.goldSilverSession, payload.silverRateKg, payload.gold24Rate, payload.gold22Rate].join('|');
+      const prevKey = (await iref.child('k').once('value')).val();
+      if (ikey !== prevKey && payload.silverRateKg) {
+        const cfgRaw = (await admin.database().ref('widgetConfig/newsSourceConfig/ratesCfg').once('value')).val() || {};
+        const cfg = Object.assign({}, INSIGHT_DEFAULT_CFG, cfgRaw);
+        const all = (await admin.database().ref('widgetConfig/rateHistory').orderByKey().limitToLast(cfg.keepDays).once('value')).val() || {};
+        const byDay = {};
+        Object.keys(all).sort().forEach((k) => { const h = all[k]; if (h && h.d) byDay[h.d] = h; });   // newest entry of each IBJA day wins
+        byDay[entry.d] = entry;
+        const days = Object.keys(byDay).sort();
+        const mk = (field, seed) => {
+          const own = days.map((d) => ({ d, v: parseFloat(byDay[d][field]) })).filter((x) => Number.isFinite(x.v) && x.v > 0);
+          const first = own.length ? own[0].d : '9999-12-31';
+          const pub = (seed || []).filter((x) => x[0] < first).map((x) => ({ d: x[0], v: x[1], p: 1 }));
+          return pub.concat(own);
+        };
+        const out = { k: ikey, at: new Date().toISOString(), asOf: payload.goldSilverAsOf, session: payload.goldSilverSession || '', src: payload.ratesSource || '', cfg,
+          silver: analyseRates(mk('skg', PUBLIC_SILVER_SEED), cfg, 'Silver', 'kg'), gold24: analyseRates(mk('g24'), cfg, 'Gold 24K', '10g'), gold22: analyseRates(mk('g22'), cfg, 'Gold 22K', '10g') };
+        await iref.set(out);
+        const cut = istIso(new Date(istNow().getTime() - cfg.keepDays * 864e5));
+        const old = (await admin.database().ref('widgetConfig/rateHistory').orderByKey().endAt(cut).limitToFirst(60).once('value')).val() || {};
+        for (const k of Object.keys(old)) await admin.database().ref('widgetConfig/rateHistory/' + k).remove();
+        console.log('runFetchCycle: rate analysis written', ikey, 'own days', out.silver && out.silver.ownDays, 'pruned', Object.keys(old).length);
+      }
+    } catch (e) { console.warn('runFetchCycle: rate analysis failed:', e.message); }
     // the picker's list (own node, so the widgets' hourly news download stays small)
     await admin.database().ref('widgetConfig/newsSourceConfig/fxCatalog').set(Object.keys(FX_CATALOG).map((c) => ({ c, n: FX_CATALOG[c][0], k: FX_CATALOG[c][1], f: FX_CATALOG[c][2] })));
   } catch (e) { console.warn('runFetchCycle: rate history / changes failed:', e.message); }
