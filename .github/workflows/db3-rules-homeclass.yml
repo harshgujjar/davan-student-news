@@ -1,0 +1,20 @@
+# Adds the Gujjar Home Class rules (homeclass/, hcpair/) to DB3, keeping all other rules. Safe to run again. Manual.
+name: DB3 rules - Home Class
+on:
+  workflow_dispatch:
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - working-directory: scripts
+        run: npm install --omit=dev
+      - working-directory: scripts
+        env:
+          FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+        run: node db3_rules_homeclass.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: old-db3-rules, path: scripts/old-rules.json, if-no-files-found: ignore }
