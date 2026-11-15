@@ -1,0 +1,25 @@
+# Removes Home Class families FOR EVER (only after the user's yes): copy saved as an artifact, node deleted, key blocked in the rules. Manual.
+name: DB3 remove Home Class family
+on:
+  workflow_dispatch:
+    inputs:
+      keys: { description: "Family keys, comma separated", required: true }
+      confirm: { description: 'Type DELETE <number of keys>, e.g. DELETE 2', required: true }
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - working-directory: scripts
+        run: npm install --omit=dev
+      - working-directory: scripts
+        env:
+          FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+          KEYS: ${{ inputs.keys }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: node db3_homeclass_remove.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: removed-families, path: scripts/removed-families.json, if-no-files-found: ignore, retention-days: 90 }

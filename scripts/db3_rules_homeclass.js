@@ -31,6 +31,8 @@ const WANT = {
   console.log('old rules: ' + txt.length + ' chars');
   const r = JSON.parse(stripComments(txt));
   let changed = false;
+  // keep the blocked (removed-for-ever) family keys that db3_homeclass_remove.js added
+  if (r.rules.homeclass) for (const k of Object.keys(r.rules.homeclass)) if (k[0] !== '$' && r.rules.homeclass[k]['.write'] === false) WANT.homeclass[k] = r.rules.homeclass[k];
   for (const k of Object.keys(WANT)) {
     if (JSON.stringify(r.rules[k]) !== JSON.stringify(WANT[k])) { console.log((r.rules[k] ? 'replace' : 'add') + ' rules.' + k); r.rules[k] = WANT[k]; changed = true; }
   }
