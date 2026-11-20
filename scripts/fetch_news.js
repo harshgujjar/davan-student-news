@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.9.0
- * BUILD DATE:    2026-10-31, 12:00 IST
+ * BUILD VERSION: v1.9.1
+ * BUILD DATE:    2026-11-20, 14:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,8 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.9.1 (2026-11-20) — PATCH (user: present rate not showing): on a weekday before 6 pm IST with no newer IBJA rate the note says
+ *                        "Today's rate is not published yet" instead of "No new rates today (holiday)".
  * v1.8.0 (2026-10-19) — MINOR (user: "can we show the picture of the news in the widget"): also saves the picture URL of each
  *                        headline (RSS media:content / media:thumbnail / enclosure / first <img>) as indiaImg / worldImg / bollywoodImg /
  *                        sandalwoodImg (same order as *Headlines, '' = none). A few bytes per headline; no new reads. Pairs with student widget w2xx.
@@ -1359,7 +1361,7 @@ async function runFetchCycle() {
       payload.ratesAsOfText = 'International price of ' + dayText(day);
     } else payload.ratesAsOfText = day ? 'Rates of ' + dayText(day) : '';
     payload.ratesNote = day && day < todayIso
-      ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : 'No new rates today (holiday)') + ' - last published rates shown'
+      ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : (today.getUTCHours() < 18 ? "Today's rate is not published yet" : 'No new rates today (holiday)')) + ' - last published rates shown'
       : '';
   }
 
