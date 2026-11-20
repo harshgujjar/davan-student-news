@@ -1,7 +1,7 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- * BUILD VERSION: v1.9.1
- * BUILD DATE:    2026-11-20, 14:00 IST
+ * BUILD VERSION: v1.10.0
+ * BUILD DATE:    2026-11-20, 15:00 IST
  * ───────────────────────────────────────────────────────────────────
  * This header is bumped EVERY time this file is edited — version AND
  * date/time together, in the same edit as the code change itself. This
@@ -15,6 +15,10 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.10.0 (2026-11-20) — MINOR (user: "present rate not showing ... build the live indicator"): new field news.liveRate = {g24, g22, skg, at, basis, cal}
+ *                        = live international price (goldprice.dev) x a ratio that is re-measured against IBJA on the first run after each new
+ *                        IBJA publication (DB3 widgetConfig/newsSourceConfig/liveCal). Shown by rates.html as "Live indicative"; hidden until a
+ *                        calibration exists and when older than 12 h. Also news.ratesJobVer. No extra reads for the apps.
  * v1.9.1 (2026-11-20) — PATCH (user: present rate not showing): on a weekday before 6 pm IST with no newer IBJA rate the note says
  *                        "Today's rate is not published yet" instead of "No new rates today (holiday)".
  * v1.8.0 (2026-10-19) — MINOR (user: "can we show the picture of the news in the widget"): also saves the picture URL of each
@@ -653,6 +657,33 @@ async function fetchIbjaRates() {
     console.error('fetchIbjaRates FAILED:', e.message);
     return null;
   }
+}
+
+// v1.10.0 — live indicative rate: international spot (INR) x ratio measured against IBJA when a NEW IBJA row appears.
+// The ratio absorbs the import duty / premium, so the line tracks the Indian price without a second Indian source.
+async function liveIndicative(payload) {
+  if (payload.ratesSource !== 'IBJA' || !payload.gold24Rate || !payload.silverRateKg) return null;
+  const todayIso = istIso(istNow());
+  const caratData = await fetchJsonPatient(SOURCES.goldCaratApi, 2);
+  await sleep(1000);
+  const silverData = await fetchJsonPatient(SOURCES.silverConvertApi, 2);
+  const s24 = parseFloat(caratData && caratData.price_gram_24k) * 10;
+  const s22 = parseFloat(caratData && caratData.price_gram_22k) * 10;
+  const sKg = parseFloat(silverData && silverData.result) * 100;
+  if (![s24, s22, sKg].every((x) => Number.isFinite(x) && x > 0)) throw new Error('live spot: invalid price field');
+  const calRef = admin.database().ref('widgetConfig/newsSourceConfig/liveCal');
+  let cal = (await calRef.once('value')).val() || null;
+  const key = [payload.goldSilverAsOf, payload.goldSilverSession].join('|');
+  // a NEW IBJA row published today: measure the ratio now (spot and IBJA are within minutes of each other)
+  if ((!cal || cal.k !== key) && payload.goldSilverAsOf === todayIso) {
+    cal = { k: key, at: Date.now(), r24: +payload.gold24Rate / s24, r22: +payload.gold22Rate / s22, rs: +payload.silverRateKg / sKg,
+      txt: payload.ratesAsOfText || '' };
+    if (![cal.r24, cal.r22, cal.rs].every((x) => x > 0.5 && x < 2)) throw new Error('live spot: ratio out of range ' + JSON.stringify(cal));
+    await calRef.set(cal);
+  }
+  if (!cal || Date.now() - cal.at > 4 * 864e5) return null;   // never calibrated, or too old: show nothing rather than guess
+  return { g24: Math.round(s24 * cal.r24), g22: Math.round(s22 * cal.r22), skg: Math.round(sKg * cal.rs), at: Date.now(),
+    basis: 'live international price matched to ' + (cal.txt || 'IBJA') };
 }
 
 // Open-Meteo weather_code -> short human label. Minimal mapping covering
@@ -1363,6 +1394,14 @@ async function runFetchCycle() {
     payload.ratesNote = day && day < todayIso
       ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : (today.getUTCHours() < 18 ? "Today's rate is not published yet" : 'No new rates today (holiday)')) + ' - last published rates shown'
       : '';
+  }
+
+  // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
+  payload.ratesJobVer = 'v1.10.0 · 20 Nov 2026';
+  try { payload.liveRate = await liveIndicative(payload); }
+  catch (e) {
+    console.warn('runFetchCycle: live indicative failed:', e.message);
+    try { payload.liveRate = ((await admin.database().ref('widgetConfig/news/liveRate').once('value')).val()) || null; } catch (e2) { payload.liveRate = null; }
   }
 
   await admin.database().ref('widgetConfig/news').set(payload);
