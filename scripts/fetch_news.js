@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.10.1 (2026-11-23) — PATCH: after 6 pm the note says "IBJA has not published a new rate today (holiday or not posted)" (it cannot know it is a holiday).
  * v1.10.0 (2026-11-20) — MINOR (user: "present rate not showing ... build the live indicator"): new field news.liveRate = {g24, g22, skg, at, basis, cal}
  *                        = live international price (goldprice.dev) x a ratio that is re-measured against IBJA on the first run after each new
  *                        IBJA publication (DB3 widgetConfig/newsSourceConfig/liveCal). Shown by rates.html as "Live indicative"; hidden until a
@@ -1392,12 +1393,12 @@ async function runFetchCycle() {
       payload.ratesAsOfText = 'International price of ' + dayText(day);
     } else payload.ratesAsOfText = day ? 'Rates of ' + dayText(day) : '';
     payload.ratesNote = day && day < todayIso
-      ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : (today.getUTCHours() < 18 ? "Today's rate is not published yet" : 'No new rates today (holiday)')) + ' - last published rates shown'
+      ? (wd === 0 || wd === 6 ? 'Market closed today (' + (wd === 0 ? 'Sunday' : 'Saturday') + ')' : (today.getUTCHours() < 18 ? "Today's rate is not published yet" : 'IBJA has not published a new rate today (holiday or not posted)')) + ' - last published rates shown'
       : '';
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.10.0 · 20 Nov 2026';
+  payload.ratesJobVer = 'v1.10.1 · 23 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
