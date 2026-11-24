@@ -668,7 +668,7 @@ async function fetchIbjaRates() {
 //  A) IBJA published TODAY and a ratio is stored: international spot (INR) x ratio measured against IBJA (the ratio absorbs duty / premium).
 //  B) IBJA is late: the Indian retail rate pages (the same numbers Google shows), read as text and checked against the last IBJA rate.
 //  Then A with an older ratio (up to 4 days), else nothing - the page hides the line. Sources and limits live in DB3 newsSourceConfig/liveCfg.
-const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 18, sources: [
+const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 8, sources: [
   { id: 'goodreturns', name: 'Goodreturns', gold: 'https://www.goodreturns.in/gold-rates/', silver: 'https://www.goodreturns.in/silver-rates/' },
   { id: 'groww', name: 'Groww', gold: 'https://groww.in/gold-rates', silver: 'https://groww.in/silver-rates' },
   { id: 'kotakneo', name: 'Kotak Neo', gold: 'https://www.kotakneo.com/gold-rates/', silver: 'https://www.kotakneo.com/silver-rates/' } ] };
@@ -719,7 +719,7 @@ async function liveRetail(payload, cfg, dbg) {
       try {
         const st = await livePageText(src.silver);
         const cs = liveCandidates(st, /silver/, refS, cfg.silverTolPct, [1, 10, 100, 1000]);
-        if (cs.length) skg = cs[0];
+        if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS) < Math.abs(a - refS) ? v : a));   // the one nearest the last IBJA silver
       } catch (e) { dbg[src.id + '_silver'] = e.message; }
       dbg[src.id] = 'ok ' + g24 + ' / ' + g22 + ' / ' + skg;
       return { g24, g22, skg: skg || null, src: src.name };
