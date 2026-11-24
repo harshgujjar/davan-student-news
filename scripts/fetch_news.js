@@ -15,6 +15,10 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.11.0 (2026-11-24) — MINOR (user: live rate while IBJA is late): news.liveRate = {g24, g22, skg|null, at, basis, src?}. IBJA posted today -> spot x ratio
+ *                        (A); IBJA late -> Indian retail pages (B: Goodreturns, Groww, Kotak Neo; each number checked against the last IBJA rate);
+ *                        then A with an older ratio, else null. The spot is logged each run (newsSourceConfig/spotLog) so a late IBJA row is matched to the
+ *                        spot of its own publish time. Sources / limits editable in newsSourceConfig/liveCfg. Debug: newsSourceConfig/liveDebug.
  * v1.10.1 (2026-11-23) — PATCH: after 6 pm the note says "IBJA has not published a new rate today (holiday or not posted)" (it cannot know it is a holiday).
  * v1.10.0 (2026-11-20) — MINOR (user: "present rate not showing ... build the live indicator"): new field news.liveRate = {g24, g22, skg, at, basis, cal}
  *                        = live international price (goldprice.dev) x a ratio that is re-measured against IBJA on the first run after each new
@@ -660,31 +664,102 @@ async function fetchIbjaRates() {
   }
 }
 
-// v1.10.0 — live indicative rate: international spot (INR) x ratio measured against IBJA when a NEW IBJA row appears.
-// The ratio absorbs the import duty / premium, so the line tracks the Indian price without a second Indian source.
+// v1.11.0 — live indicative rate. Two ways, tried in this order:
+//  A) IBJA published TODAY and a ratio is stored: international spot (INR) x ratio measured against IBJA (the ratio absorbs duty / premium).
+//  B) IBJA is late: the Indian retail rate pages (the same numbers Google shows), read as text and checked against the last IBJA rate.
+//  Then A with an older ratio (up to 4 days), else nothing - the page hides the line. Sources and limits live in DB3 newsSourceConfig/liveCfg.
+const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 18, sources: [
+  { id: 'goodreturns', name: 'Goodreturns', gold: 'https://www.goodreturns.in/gold-rates/', silver: 'https://www.goodreturns.in/silver-rates/' },
+  { id: 'groww', name: 'Groww', gold: 'https://groww.in/gold-rates', silver: 'https://groww.in/silver-rates' },
+  { id: 'kotakneo', name: 'Kotak Neo', gold: 'https://www.kotakneo.com/gold-rates/', silver: 'https://www.kotakneo.com/silver-rates/' } ] };
+
+async function liveSpot() {
+  try {
+    const caratData = await fetchJsonPatient(SOURCES.goldCaratApi, 2);
+    await sleep(1000);
+    const silverData = await fetchJsonPatient(SOURCES.silverConvertApi, 2);
+    const s24 = parseFloat(caratData && caratData.price_gram_24k) * 10, s22 = parseFloat(caratData && caratData.price_gram_22k) * 10, sKg = parseFloat(silverData && silverData.result) * 100;
+    return [s24, s22, sKg].every((x) => Number.isFinite(x) && x > 0) ? { s24, s22, sKg } : null;
+  } catch (e) { console.warn('liveSpot failed:', e.message); return null; }
+}
+
+async function livePageText(url) {
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36', 'Accept-Language': 'en-IN,en;q=0.9' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return (await res.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#8377;|&rupee;/gi, ' ').replace(/\s+/g, ' ');
+  } finally { clearTimeout(timer); }
+}
+
+// every number written after the label (within 260 characters) that, as per gram / 10 g / kg, lands within tol % of the reference
+function liveCandidates(text, labelRe, ref, tolPct, mults) {
+  const out = []; const re = new RegExp(labelRe.source, 'gi'); let m, guard = 0;
+  while ((m = re.exec(text)) && guard++ < 40) {
+    const seg = text.slice(m.index, m.index + 260);
+    for (const n of (seg.match(/\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d{4,9}(?:\.\d+)?/g) || [])) {
+      const v = parseFloat(n.replace(/,/g, ''));
+      for (const k of mults) { const x = v * k; if (Math.abs(x - ref) / ref <= tolPct / 100) { out.push(Math.round(x)); break; } }
+    }
+  }
+  return out;
+}
+
+async function liveRetail(payload, cfg, dbg) {
+  const ref24 = +payload.gold24Rate, ref22 = +payload.gold22Rate, refS = +payload.silverRateKg;
+  for (const src of cfg.sources) {
+    try {
+      const gt = await livePageText(src.gold);
+      const c24 = liveCandidates(gt, /24\s*(?:k\b|kt\b|karat|carat|ct\b)/, ref24, cfg.tolPct, [1, 10]);
+      const c22 = liveCandidates(gt, /22\s*(?:k\b|kt\b|karat|carat|ct\b)/, ref22, cfg.tolPct, [1, 10]);
+      let g24 = 0, g22 = 0;
+      for (const a of c24) { const b = c22.find((y) => y / a > 0.909 && y / a < 0.925); if (b) { g24 = a; g22 = b; break; } }   // 22K / 24K = 0.916 / 0.999
+      if (!g24) { dbg[src.id] = 'gold: no 24K+22K pair (24K ' + c24.slice(0, 3) + ' | 22K ' + c22.slice(0, 3) + ') len ' + gt.length; continue; }
+      let skg = 0;
+      try {
+        const st = await livePageText(src.silver);
+        const cs = liveCandidates(st, /silver/, refS, cfg.silverTolPct, [1, 10, 100, 1000]);
+        if (cs.length) skg = cs[0];
+      } catch (e) { dbg[src.id + '_silver'] = e.message; }
+      dbg[src.id] = 'ok ' + g24 + ' / ' + g22 + ' / ' + skg;
+      return { g24, g22, skg: skg || null, src: src.name };
+    } catch (e) { dbg[src.id] = 'failed: ' + e.message; }
+  }
+  return null;
+}
+
 async function liveIndicative(payload) {
   if (payload.ratesSource !== 'IBJA' || !payload.gold24Rate || !payload.silverRateKg) return null;
-  const todayIso = istIso(istNow());
-  const caratData = await fetchJsonPatient(SOURCES.goldCaratApi, 2);
-  await sleep(1000);
-  const silverData = await fetchJsonPatient(SOURCES.silverConvertApi, 2);
-  const s24 = parseFloat(caratData && caratData.price_gram_24k) * 10;
-  const s22 = parseFloat(caratData && caratData.price_gram_22k) * 10;
-  const sKg = parseFloat(silverData && silverData.result) * 100;
-  if (![s24, s22, sKg].every((x) => Number.isFinite(x) && x > 0)) throw new Error('live spot: invalid price field');
-  const calRef = admin.database().ref('widgetConfig/newsSourceConfig/liveCal');
+  const db = admin.database(); const todayIso = istIso(istNow()); const dbg = {};
+  let cfg = LIVE_DEFAULT;
+  try { const c = (await db.ref('widgetConfig/newsSourceConfig/liveCfg').once('value')).val(); if (c && Array.isArray(c.sources) && c.sources.length) cfg = { ...LIVE_DEFAULT, ...c }; } catch (e) { /* keep defaults */ }
+  const spot = await liveSpot();
+  // A) the spot log (one small sample per run) and the ratio against IBJA
+  const calRef = db.ref('widgetConfig/newsSourceConfig/liveCal'), logRef = db.ref('widgetConfig/newsSourceConfig/spotLog');
   let cal = (await calRef.once('value')).val() || null;
+  let log = (await logRef.once('value')).val() || []; if (!Array.isArray(log)) log = Object.values(log);
+  const now = Date.now();
+  if (spot) { log.push({ t: now, a: Math.round(spot.s24), b: Math.round(spot.s22), c: Math.round(spot.sKg) }); log = log.filter((x) => x && now - x.t < 3 * 864e5).slice(-40); await logRef.set(log); }
   const key = [payload.goldSilverAsOf, payload.goldSilverSession].join('|');
-  // a NEW IBJA row published today: measure the ratio now (spot and IBJA are within minutes of each other)
-  if ((!cal || cal.k !== key) && payload.goldSilverAsOf === todayIso) {
-    cal = { k: key, at: Date.now(), r24: +payload.gold24Rate / s24, r22: +payload.gold22Rate / s22, rs: +payload.silverRateKg / sKg,
-      txt: payload.ratesAsOfText || '' };
-    if (![cal.r24, cal.r22, cal.rs].every((x) => x > 0.5 && x < 2)) throw new Error('live spot: ratio out of range ' + JSON.stringify(cal));
-    await calRef.set(cal);
+  if ((!cal || cal.k !== key) && log.length) {
+    // when was this IBJA row published? AM about 11:30, PM about 17:30 IST of its own day - use the sample nearest to that time (max 2.5 h away)
+    const pubAt = Date.parse(payload.goldSilverAsOf + 'T' + (payload.goldSilverSession === 'PM' ? '17:30' : '11:30') + ':00+05:30');
+    let best = null; for (const x of log) { const d = Math.abs(x.t - pubAt); if (d <= 2.5 * 36e5 && (!best || d < best.d)) best = { x, d }; }
+    if (!best && payload.goldSilverAsOf === todayIso && spot) best = { x: { a: spot.s24, b: spot.s22, c: spot.sKg } };   // published today, caught fresh
+    if (best) {
+      const n = { k: key, at: now, r24: +payload.gold24Rate / best.x.a, r22: +payload.gold22Rate / best.x.b, rs: +payload.silverRateKg / best.x.c, txt: payload.ratesAsOfText || '' };
+      if ([n.r24, n.r22, n.rs].every((v) => v > 0.5 && v < 2)) { cal = n; await calRef.set(cal); } else dbg.cal = 'ratio out of range';
+    }
   }
-  if (!cal || Date.now() - cal.at > 4 * 864e5) return null;   // never calibrated, or too old: show nothing rather than guess
-  return { g24: Math.round(s24 * cal.r24), g22: Math.round(s22 * cal.r22), skg: Math.round(sKg * cal.rs), at: Date.now(),
-    basis: 'live international price matched to ' + (cal.txt || 'IBJA') };
+  const fromSpot = () => (spot && cal && now - cal.at < 4 * 864e5)
+    ? { g24: Math.round(spot.s24 * cal.r24), g22: Math.round(spot.s22 * cal.r22), skg: Math.round(spot.sKg * cal.rs), at: now, basis: 'live international price matched to ' + (cal.txt || 'IBJA') } : null;
+  let out = null;
+  if (payload.goldSilverAsOf === todayIso) out = fromSpot();                       // IBJA came today: A
+  if (!out) { const r = await liveRetail(payload, cfg, dbg); if (r) out = { g24: r.g24, g22: r.g22, skg: r.skg, at: now, src: r.src, basis: 'retail' }; }   // IBJA late: B
+  if (!out) out = fromSpot();                                                       // B failed: A with the older ratio
+  if (out && out.src && !out.skg) { const f = fromSpot(); if (f) out.skg = f.skg; }   // silver from A when the retail page had none
+  try { await db.ref('widgetConfig/newsSourceConfig/liveDebug').set({ at: now, dbg, used: out ? (out.src || 'spot') : 'none', spot: !!spot, cal: cal ? cal.k : '' }); } catch (e) { /* debug only */ }
+  return out;
 }
 
 // Open-Meteo weather_code -> short human label. Minimal mapping covering
@@ -1398,7 +1473,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.10.1 · 23 Nov 2026';
+  payload.ratesJobVer = 'v1.11.0 · 24 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
