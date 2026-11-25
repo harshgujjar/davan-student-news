@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.11.1 (2026-11-25) — PATCH (user: silver missing): the retail silver number is checked against IBJA silver moved by gold's own change (tolerance 12%), not against the stale IBJA value; the debug note says why a silver number was refused.
  * v1.11.0 (2026-11-24) — MINOR (user: live rate while IBJA is late): news.liveRate = {g24, g22, skg|null, at, basis, src?}. IBJA posted today -> spot x ratio
  *                        (A); IBJA late -> Indian retail pages (B: Goodreturns, Groww, Kotak Neo; each number checked against the last IBJA rate);
  *                        then A with an older ratio, else null. The spot is logged each run (newsSourceConfig/spotLog) so a late IBJA row is matched to the
@@ -668,7 +669,7 @@ async function fetchIbjaRates() {
 //  A) IBJA published TODAY and a ratio is stored: international spot (INR) x ratio measured against IBJA (the ratio absorbs duty / premium).
 //  B) IBJA is late: the Indian retail rate pages (the same numbers Google shows), read as text and checked against the last IBJA rate.
 //  Then A with an older ratio (up to 4 days), else nothing - the page hides the line. Sources and limits live in DB3 newsSourceConfig/liveCfg.
-const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 8, sources: [
+const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 12, sources: [
   { id: 'goodreturns', name: 'Goodreturns', gold: 'https://www.goodreturns.in/gold-rates/', silver: 'https://www.goodreturns.in/silver-rates/' },
   { id: 'groww', name: 'Groww', gold: 'https://groww.in/gold-rates', silver: 'https://groww.in/silver-rates' },
   { id: 'kotakneo', name: 'Kotak Neo', gold: 'https://www.kotakneo.com/gold-rates/', silver: 'https://www.kotakneo.com/silver-rates/' } ] };
@@ -718,8 +719,11 @@ async function liveRetail(payload, cfg, dbg) {
       let skg = 0;
       try {
         const st = await livePageText(src.silver);
-        const cs = liveCandidates(st, /silver/, refS, cfg.silverTolPct, [1, 10, 100, 1000]);
-        if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS) < Math.abs(a - refS) ? v : a));   // the one nearest the last IBJA silver
+        // silver is expected to move at least like gold since the last IBJA row, so check against IBJA silver moved by gold's own change
+        const refS2 = refS * (g24 / ref24);
+        const cs = liveCandidates(st, /silver/, refS2, cfg.silverTolPct, [1, 10, 100, 1000]);
+        if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS2) < Math.abs(a - refS2) ? v : a));   // the one nearest that
+        else dbg[src.id + '_silver'] = 'no silver number within ' + cfg.silverTolPct + '% of ' + Math.round(refS2) + ' (page text ' + st.length + ' chars: ' + (st.match(/silver[^a-z]{0,6}.{0,80}/i) || [''])[0].slice(0, 110) + ')';
       } catch (e) { dbg[src.id + '_silver'] = e.message; }
       dbg[src.id] = 'ok ' + g24 + ' / ' + g22 + ' / ' + skg;
       return { g24, g22, skg: skg || null, src: src.name };
@@ -1473,7 +1477,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.11.0 · 24 Nov 2026';
+  payload.ratesJobVer = 'v1.11.1 · 25 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
