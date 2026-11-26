@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.12.0 (2026-11-26) — MINOR (user: "check properly"): the retail rate is used only when two sites agree within 2% (or one site is within 5% of the previous reading); a single misread (1,14,400 vs 1,23,270 on Groww / Kotak Neo) is no longer shown. liveDebug lists each site's reading.
  * v1.11.2 (2026-11-26) — PATCH: writes a small debug note of what the IBJA page looked like (newsSourceConfig/ibjaDebug) to find out why no new IBJA row was read for 3 days.
  * v1.11.1 (2026-11-25) — PATCH (user: silver missing): the retail silver number is checked against IBJA silver moved by gold's own change (tolerance 12%), not against the stale IBJA value; the debug note says why a silver number was refused.
  * v1.11.0 (2026-11-24) — MINOR (user: live rate while IBJA is late): news.liveRate = {g24, g22, skg|null, at, basis, src?}. IBJA posted today -> spot x ratio
@@ -714,8 +715,9 @@ function liveCandidates(text, labelRe, ref, tolPct, mults) {
   return out;
 }
 
-async function liveRetail(payload, cfg, dbg) {
+async function liveRetail(payload, cfg, dbg, prev) {
   const ref24 = +payload.gold24Rate, ref22 = +payload.gold22Rate, refS = +payload.silverRateKg;
+  const got = [];
   for (const src of cfg.sources) {
     try {
       const gt = await livePageText(src.gold);
@@ -723,20 +725,35 @@ async function liveRetail(payload, cfg, dbg) {
       const c22 = liveCandidates(gt, /22\s*(?:k\b|kt\b|karat|carat|ct\b)/, ref22, cfg.tolPct, [1, 10]);
       let g24 = 0, g22 = 0;
       for (const a of c24) { const b = c22.find((y) => y / a > 0.909 && y / a < 0.925); if (b) { g24 = a; g22 = b; break; } }   // 22K / 24K = 0.916 / 0.999
-      if (!g24) { dbg[src.id] = 'gold: no 24K+22K pair (24K ' + c24.slice(0, 3) + ' | 22K ' + c22.slice(0, 3) + ') len ' + gt.length; continue; }
+      if (!g24) { dbg[src.id] = 'gold: no 24K+22K pair (24K ' + c24.slice(0, 4) + ' | 22K ' + c22.slice(0, 4) + ') len ' + gt.length; continue; }
       let skg = 0;
       try {
         const st = await livePageText(src.silver);
         // silver is expected to move at least like gold since the last IBJA row, so check against IBJA silver moved by gold's own change
         const refS2 = refS * (g24 / ref24);
         const cs = liveCandidates(st, /silver/, refS2, cfg.silverTolPct, [1, 10, 100, 1000]);
-        if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS2) < Math.abs(a - refS2) ? v : a));   // the one nearest that
-        else dbg[src.id + '_silver'] = 'no silver number within ' + cfg.silverTolPct + '% of ' + Math.round(refS2) + ' (page text ' + st.length + ' chars: ' + (st.match(/silver[^a-z]{0,6}.{0,80}/i) || [''])[0].slice(0, 110) + ')';
+        if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS2) < Math.abs(a - refS2) ? v : a));
+        else dbg[src.id + '_silver'] = 'no silver number within ' + cfg.silverTolPct + '% of ' + Math.round(refS2);
       } catch (e) { dbg[src.id + '_silver'] = e.message; }
-      dbg[src.id] = 'ok ' + g24 + ' / ' + g22 + ' / ' + skg;
-      return { g24, g22, skg: skg || null, src: src.name };
+      dbg[src.id] = 'read ' + g24 + ' / ' + g22 + ' / ' + skg + ' (24K list ' + c24.slice(0, 4) + ')';
+      got.push({ g24, g22, skg: skg || null, src: src.name });
     } catch (e) { dbg[src.id] = 'failed: ' + e.message; }
   }
+  if (!got.length) return null;
+  // v1.12.0 — one site can be misread (user, 26-Nov: 1,14,400 shown while Groww / Kotak said 1,23,270): use the numbers only when two sites agree within 2%,
+  // or when a single site is within 5% of the previous live reading (less than 12 h old).
+  for (let i = 0; i < got.length; i++) for (let j = i + 1; j < got.length; j++) {
+    if (Math.abs(got[i].g24 - got[j].g24) / got[i].g24 <= 0.02) {
+      const sk = [got[i].skg, got[j].skg].filter(Boolean);
+      dbg.pick = 'agree ' + got[i].src + ' + ' + got[j].src;
+      return { g24: Math.round((got[i].g24 + got[j].g24) / 2), g22: Math.round((got[i].g22 + got[j].g22) / 2), skg: sk.length ? Math.round(sk.reduce((x, y) => x + y, 0) / sk.length) : null, src: got[i].src + ' + ' + got[j].src };
+    }
+  }
+  if (prev && prev.g24 && Date.now() - prev.at < 12 * 36e5) {
+    const near = got.find((x) => Math.abs(x.g24 - prev.g24) / prev.g24 <= 0.05);
+    if (near) { dbg.pick = 'single, near the last reading: ' + near.src; return near; }
+  }
+  dbg.pick = 'no agreement: ' + got.map((x) => x.src + ' ' + x.g24).join(', ');
   return null;
 }
 
@@ -767,7 +784,8 @@ async function liveIndicative(payload) {
     ? { g24: Math.round(spot.s24 * cal.r24), g22: Math.round(spot.s22 * cal.r22), skg: Math.round(spot.sKg * cal.rs), at: now, basis: 'live international price matched to ' + (cal.txt || 'IBJA') } : null;
   let out = null;
   if (payload.goldSilverAsOf === todayIso) out = fromSpot();                       // IBJA came today: A
-  if (!out) { const r = await liveRetail(payload, cfg, dbg); if (r) out = { g24: r.g24, g22: r.g22, skg: r.skg, at: now, src: r.src, basis: 'retail' }; }   // IBJA late: B
+  let prevLive = null; try { prevLive = (await db.ref('widgetConfig/news/liveRate').once('value')).val(); } catch (e) { /* none */ }
+  if (!out) { const r = await liveRetail(payload, cfg, dbg, prevLive); if (r) out = { g24: r.g24, g22: r.g22, skg: r.skg, at: now, src: r.src, basis: 'retail' }; }   // IBJA late: B
   if (!out) out = fromSpot();                                                       // B failed: A with the older ratio
   if (out && out.src && !out.skg) { const f = fromSpot(); if (f) out.skg = f.skg; }   // silver from A when the retail page had none
   try { await db.ref('widgetConfig/newsSourceConfig/liveDebug').set({ at: now, dbg, used: out ? (out.src || 'spot') : 'none', spot: !!spot, cal: cal ? cal.k : '' }); } catch (e) { /* debug only */ }
@@ -1485,7 +1503,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.11.2 · 26 Nov 2026';
+  payload.ratesJobVer = 'v1.12.0 · 26 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
