@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.11.2 (2026-11-26) — PATCH: writes a small debug note of what the IBJA page looked like (newsSourceConfig/ibjaDebug) to find out why no new IBJA row was read for 3 days.
  * v1.11.1 (2026-11-25) — PATCH (user: silver missing): the retail silver number is checked against IBJA silver moved by gold's own change (tolerance 12%), not against the stale IBJA value; the debug note says why a silver number was refused.
  * v1.11.0 (2026-11-24) — MINOR (user: live rate while IBJA is late): news.liveRate = {g24, g22, skg|null, at, basis, src?}. IBJA posted today -> spot x ratio
  *                        (A); IBJA late -> Indian retail pages (B: Goodreturns, Groww, Kotak Neo; each number checked against the last IBJA rate);
@@ -643,6 +644,13 @@ async function fetchIbjaRates() {
     const re = /(\d{2})\/(\d{2})\/(\d{4}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,7}) (\d{4,8}) (\d{3,7})/g;
     let m;
     while ((m = re.exec(text))) rows.push({ iso: `${m[3]}-${m[2]}-${m[1]}`, g999: +m[4], g916: +m[6], g750: +m[7], silverKg: +m[9] });
+    // v1.11.2 — debug: what the IBJA page looked like on this run (read it in DB3 newsSourceConfig/ibjaDebug)
+    try {
+      const dts = (text.match(/\d{2}\/\d{2}\/\d{4}/g) || []);
+      const i0 = text.search(/\d{2}\/\d{2}\/\d{4}/);
+      await admin.database().ref('widgetConfig/newsSourceConfig/ibjaDebug').set({ at: Date.now(), htmlLen: html.length, rows: rows.length, dates: dts.slice(0, 14), newestRow: rows.length ? rows.reduce((a, r) => (r.iso > a ? r.iso : a), '') : '',
+        sample: text.slice(Math.max(0, i0 - 60), Math.max(0, i0) + 420) });
+    } catch (e) { /* debug only */ }
     if (!rows.length) throw new Error('no rate rows found on the page');
     // The AM block comes first; the PM block starts where the dates run back to the top.
     const am = [], pm = [];
@@ -1477,7 +1485,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.11.1 · 25 Nov 2026';
+  payload.ratesJobVer = 'v1.11.2 · 26 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
