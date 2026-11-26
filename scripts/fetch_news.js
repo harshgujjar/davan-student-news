@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.12.1 (2026-11-26) — PATCH: retail silver must be within 7% of IBJA silver moved by 1.5 x gold's change (a 1,32,000 reading was ~10% too low next to MCX / Open Press ~1,44,000-1,47,000 and is now refused; the silver row hides instead of showing a doubtful number).
  * v1.12.0 (2026-11-26) — MINOR (user: "check properly"): the retail rate is used only when two sites agree within 2% (or one site is within 5% of the previous reading); a single misread (1,14,400 vs 1,23,270 on Groww / Kotak Neo) is no longer shown. liveDebug lists each site's reading.
  * v1.11.2 (2026-11-26) — PATCH: writes a small debug note of what the IBJA page looked like (newsSourceConfig/ibjaDebug) to find out why no new IBJA row was read for 3 days.
  * v1.11.1 (2026-11-25) — PATCH (user: silver missing): the retail silver number is checked against IBJA silver moved by gold's own change (tolerance 12%), not against the stale IBJA value; the debug note says why a silver number was refused.
@@ -678,7 +679,7 @@ async function fetchIbjaRates() {
 //  A) IBJA published TODAY and a ratio is stored: international spot (INR) x ratio measured against IBJA (the ratio absorbs duty / premium).
 //  B) IBJA is late: the Indian retail rate pages (the same numbers Google shows), read as text and checked against the last IBJA rate.
 //  Then A with an older ratio (up to 4 days), else nothing - the page hides the line. Sources and limits live in DB3 newsSourceConfig/liveCfg.
-const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 12, sources: [
+const LIVE_DEFAULT = { tolPct: 12, silverTolPct: 7, sources: [
   { id: 'goodreturns', name: 'Goodreturns', gold: 'https://www.goodreturns.in/gold-rates/', silver: 'https://www.goodreturns.in/silver-rates/' },
   { id: 'groww', name: 'Groww', gold: 'https://groww.in/gold-rates', silver: 'https://groww.in/silver-rates' },
   { id: 'kotakneo', name: 'Kotak Neo', gold: 'https://www.kotakneo.com/gold-rates/', silver: 'https://www.kotakneo.com/silver-rates/' } ] };
@@ -730,7 +731,7 @@ async function liveRetail(payload, cfg, dbg, prev) {
       try {
         const st = await livePageText(src.silver);
         // silver is expected to move at least like gold since the last IBJA row, so check against IBJA silver moved by gold's own change
-        const refS2 = refS * (g24 / ref24);
+        const refS2 = refS * (1 + 1.5 * (g24 / ref24 - 1));   // silver moves about 1.5 x gold
         const cs = liveCandidates(st, /silver/, refS2, cfg.silverTolPct, [1, 10, 100, 1000]);
         if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS2) < Math.abs(a - refS2) ? v : a));
         else dbg[src.id + '_silver'] = 'no silver number within ' + cfg.silverTolPct + '% of ' + Math.round(refS2);
@@ -1508,7 +1509,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.12.0 · 26 Nov 2026';
+  payload.ratesJobVer = 'v1.12.1 · 26 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
