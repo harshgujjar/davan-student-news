@@ -734,6 +734,11 @@ async function liveRetail(payload, cfg, dbg, prev) {
         const cs = liveCandidates(st, /silver/, refS2, cfg.silverTolPct, [1, 10, 100, 1000]);
         if (cs.length) skg = cs.reduce((a, v) => (Math.abs(v - refS2) < Math.abs(a - refS2) ? v : a));
         else dbg[src.id + '_silver'] = 'no silver number within ' + cfg.silverTolPct + '% of ' + Math.round(refS2);
+        if (skg) {   // debug: the words around the silver number the job took
+          const forms = [skg.toLocaleString('en-IN'), skg.toLocaleString('en-US'), String(skg)].map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+          const mm = st.match(new RegExp('(.{0,90})(?:' + forms.join('|') + ')(.{0,40})'));
+          dbg[src.id + '_silverCtx'] = mm ? mm[0].slice(0, 190) : 'number not found as written';
+        }
       } catch (e) { dbg[src.id + '_silver'] = e.message; }
       dbg[src.id] = 'read ' + g24 + ' / ' + g22 + ' / ' + skg + ' (24K list ' + c24.slice(0, 4) + ')';
       got.push({ g24, g22, skg: skg || null, src: src.name });
