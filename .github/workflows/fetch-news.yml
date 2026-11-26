@@ -15,10 +15,10 @@ on:
     # explicit instruction — both entries trigger the same job, and the
     # job tells them apart via github.event.schedule below.
     - cron: '30 10 * * *'
-    # 2026-11-26 (user: the page showed IBJA's rate hours late) - every 10 minutes from 10:35 am to 8:55 pm IST, Mon-Sat, so a new IBJA
-    # rate reaches the Rates page within minutes. 05-14 UTC = 10:30 am-8:30 pm IST. Minutes are staggered off :00 (GitHub's busy time).
+    # 2026-11-26 (user: the page showed IBJA's rate hours late) - every 10 minutes from 9:35 am to 9:55 pm IST, Mon-Sat, so a new IBJA
+    # rate reaches the Rates page within minutes. 04-15 UTC = 9:30 am-9:30 pm IST. Minutes are staggered off :00 (GitHub's busy time).
     # Public repository: Actions minutes are free. Runs with STOCK_FETCH unset like the 45-minute entry.
-    - cron: '5,15,25,35,45,55 5-14 * * 1-6'
+    - cron: '5,15,25,35,45,55 4-15 * * 1-6'
   workflow_dispatch:
     inputs:
       stock_fetch:
