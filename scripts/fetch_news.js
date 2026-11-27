@@ -15,6 +15,7 @@
  *           existing source
  *   PATCH — bug fix, wording/comment change, no new data written
  *
+ * v1.12.2 (2026-11-27) — PATCH: retail silver is shown only when both agreeing sites have a silver value within 3% of each other (a lone 1,65,000 reading looked high).
  * v1.12.1 (2026-11-26) — PATCH: retail silver must be within 7% of IBJA silver moved by 1.5 x gold's change (a 1,32,000 reading was ~10% too low next to MCX / Open Press ~1,44,000-1,47,000 and is now refused; the silver row hides instead of showing a doubtful number).
  * v1.12.0 (2026-11-26) — MINOR (user: "check properly"): the retail rate is used only when two sites agree within 2% (or one site is within 5% of the previous reading); a single misread (1,14,400 vs 1,23,270 on Groww / Kotak Neo) is no longer shown. liveDebug lists each site's reading.
  * v1.11.2 (2026-11-26) — PATCH: writes a small debug note of what the IBJA page looked like (newsSourceConfig/ibjaDebug) to find out why no new IBJA row was read for 3 days.
@@ -750,7 +751,8 @@ async function liveRetail(payload, cfg, dbg, prev) {
   // or when a single site is within 5% of the previous live reading (less than 12 h old).
   for (let i = 0; i < got.length; i++) for (let j = i + 1; j < got.length; j++) {
     if (Math.abs(got[i].g24 - got[j].g24) / got[i].g24 <= 0.02) {
-      const sk = [got[i].skg, got[j].skg].filter(Boolean);
+      // silver only when BOTH sites have it and agree within 3% (a single silver reading was wrong before)
+      const sk = (got[i].skg && got[j].skg && Math.abs(got[i].skg - got[j].skg) / got[i].skg <= 0.03) ? [got[i].skg, got[j].skg] : [];
       dbg.pick = 'agree ' + got[i].src + ' + ' + got[j].src;
       return { g24: Math.round((got[i].g24 + got[j].g24) / 2), g22: Math.round((got[i].g22 + got[j].g22) / 2), skg: sk.length ? Math.round(sk.reduce((x, y) => x + y, 0) / sk.length) : null, src: got[i].src + ' + ' + got[j].src };
     }
@@ -1509,7 +1511,7 @@ async function runFetchCycle() {
   }
 
   // v1.10.0 — live indicative rate (kept from the previous run when the spot source fails, the page hides it after 12 h)
-  payload.ratesJobVer = 'v1.12.1 · 26 Nov 2026';
+  payload.ratesJobVer = 'v1.12.2 · 27 Nov 2026';
   try { payload.liveRate = await liveIndicative(payload); }
   catch (e) {
     console.warn('runFetchCycle: live indicative failed:', e.message);
